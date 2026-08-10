@@ -60,13 +60,13 @@ def test_gemini_provider_generate_success(sample_prompt_context: PromptContext) 
 
     mock_client.models.generate_content.return_value = mock_response
 
-    provider = GeminiProvider(client=mock_client, model_name="gemini-2.5-flash")
+    provider = GeminiProvider(client=mock_client, model_name="gemini-3.6-flash")
     llm_response = provider.generate(sample_prompt_context)
 
     assert isinstance(llm_response, LLMResponse)
     assert llm_response.answer == "Login function is implemented in auth.py lines 6-13."
     assert llm_response.provider == "gemini"
-    assert llm_response.model == "gemini-2.5-flash"
+    assert llm_response.model == "gemini-3.6-flash"
     assert llm_response.latency_ms >= 0.0
     assert llm_response.usage_tokens == {
         "prompt_tokens": 120,

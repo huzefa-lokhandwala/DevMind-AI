@@ -13,6 +13,10 @@ from app.vector_store.faiss_store import FAISSVectorStore
 logger = logging.getLogger(__name__)
 
 
+from app.graph.code_graph import CodeGraph
+from app.retrieval.query_classifier import QueryClassifier, QueryIntent
+
+
 class Retriever:
     """Coordinates vector search, candidate retrieval, hybrid reranking, and threshold filtering."""
 
@@ -22,24 +26,20 @@ class Retriever:
         vector_store: FAISSVectorStore,
         config: RetrievalConfig | None = None,
         reranker: CodeReranker | None = None,
+        code_graph: CodeGraph | None = None,
     ) -> None:
-        """Initialize Retriever dependencies.
-
-        Args:
-            embedding_engine: Loaded embedding engine for vectorizing text queries.
-            vector_store: Indexed FAISS vector store for semantic similarity search.
-            config: Optional RetrievalConfig settings (defaults to RetrievalConfig()).
-            reranker: Optional CodeReranker instance.
-        """
+        """Initialize Retriever dependencies."""
         self._embedding_engine = embedding_engine
         self._vector_store = vector_store
         self.config = config or RetrievalConfig()
         self._reranker = reranker or CodeReranker(config=self.config)
+        self.code_graph = code_graph or CodeGraph()
 
     def retrieve(
         self,
         query: str,
         k: int = 5,
+        repository_name: str | None = None,
         similarity_threshold: float | None = None,
     ) -> list[SearchResult]:
         """Perform hybrid retrieval, reranking, and similarity threshold filtering.
@@ -47,6 +47,7 @@ class Retriever:
         Args:
             query: Natural language query string.
             k: Maximum number of top search results to return.
+            repository_name: Optional repository name filter for isolation.
             similarity_threshold: Optional similarity threshold override. Defaults to config threshold.
 
         Returns:
@@ -66,7 +67,9 @@ class Retriever:
         logger.info("Retrieving initial top-%d candidates for query: '%s'", fetch_k, query)
 
         query_embedding = self._embedding_engine.embed_query(query)
-        raw_matches = self._vector_store.search(query_embedding, k=fetch_k)
+        raw_matches = self._vector_store.search(
+            query_embedding, k=fetch_k, repository_name=repository_name
+        )
 
         if not raw_matches:
             logger.info("Vector store returned 0 candidates for query.")

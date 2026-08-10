@@ -59,27 +59,36 @@ class KeywordMatcher:
         return len(matches) / len(query_tokens)
 
     def detect_symbol_match(self, query_tokens: set[str], document: Document) -> float:
-        """Check if query tokens match function names, class names, or file names.
+        """Check if query tokens match function names, class names, file names, or directory paths.
 
         Args:
             query_tokens: Token set extracted from user query.
             document: Document instance containing symbol metadata.
 
         Returns:
-            1.0 if a direct code symbol match is detected, otherwise 0.0.
+            1.0 if a direct code symbol or path match is detected, otherwise 0.0.
         """
         if not query_tokens:
             return 0.0
 
-        symbol_names: list[str] = []
+        symbol_names: set[str] = set()
         if document.function_name:
-            symbol_names.append(document.function_name.lower())
+            symbol_names.add(document.function_name.lower())
         if document.class_name:
-            symbol_names.append(document.class_name.lower())
+            symbol_names.add(document.class_name.lower())
         if document.file_name:
             # Strip file extension
             stem = document.file_name.rsplit(".", 1)[0].lower()
-            symbol_names.append(stem)
+            symbol_names.add(stem)
+            for part in re.findall(r"[a-zA-Z0-9_]+", stem):
+                if len(part) >= 2:
+                    symbol_names.add(part.lower())
+
+        if document.file_path:
+            path_parts = re.findall(r"[a-zA-Z0-9_]+", document.file_path.lower())
+            for part in path_parts:
+                if len(part) >= 2 and part not in STOP_WORDS:
+                    symbol_names.add(part)
 
         for token in query_tokens:
             for symbol in symbol_names:

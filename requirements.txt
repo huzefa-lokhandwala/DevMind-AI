@@ -7,5 +7,11 @@ fastapi>=0.100.0
 uvicorn>=0.20.0
 httpx>=0.25.0
 
+# Persistence & Database
+sqlalchemy>=2.0.0
+psycopg[binary]>=3.1.0
+pgvector>=0.2.0
+alembic>=1.13.0
+
 # Development and testing
 pytest>=8.0.0

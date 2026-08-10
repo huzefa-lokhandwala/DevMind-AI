@@ -15,9 +15,10 @@ CodeChunker (app/chunking)
   │
   ▼
 EmbeddingEngine (app/embeddings)
+  ├── SentenceTransformer (BAAI/bge-small-en-v1.5, 384d)
   │
-  ▼
-FAISSVectorStore (app/vector_store)
+  ├──► FAISSVectorStore (app/vector_store) -- In-memory search index
+  └──► PostgreSQL + pgvector (app/db) ------ Relational & Vector persistence
   │
   ▼
 Advanced Hybrid Retriever & CodeReranker (app/retrieval)
@@ -49,6 +50,56 @@ Where:
 - Default weights: `semantic_weight = 0.65`, `keyword_weight = 0.25`, `symbol_boost = 0.10`.
 - Candidates with combined scores below `similarity_threshold` (default `0.25`) are filtered out prior to prompt assembly.
 
+## Local Development Setup
+
+### Requirements:
+- Python 3.10+
+- Docker Desktop (for PostgreSQL + pgvector container)
+
+### Step-by-Step Setup:
+
+1. **Create & Activate Virtual Environment**:
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate
+   ```
+
+2. **Install Dependencies**:
+   ```bash
+   .venv/bin/pip install -r requirements.txt
+   ```
+
+3. **Configure Environment Variables**:
+   ```bash
+   cp .env.example .env
+   # Ensure .env contains GEMINI_API_KEY and DATABASE_URL
+   ```
+
+4. **Start PostgreSQL + pgvector Container**:
+   ```bash
+   docker compose up -d
+   ```
+
+5. **Run Alembic Migrations**:
+   ```bash
+   .venv/bin/alembic upgrade head
+   ```
+
+6. **Run Test Suite**:
+   ```bash
+   .venv/bin/pytest -v
+   ```
+
+7. **Run CLI Application**:
+   ```bash
+   .venv/bin/python main.py
+   ```
+
+8. **Run FastAPI Backend Server**:
+   ```bash
+   .venv/bin/uvicorn app.api.main:app --reload
+   ```
+
 ## RAG Evaluation Benchmark
 
 DevMind AI includes an automated, offline evaluation benchmark (`app/evaluation`) measuring standard information retrieval metrics against ground-truth codebase questions.
@@ -66,46 +117,6 @@ DevMind AI includes an automated, offline evaluation benchmark (`app/evaluation`
 
 ```bash
 .venv/bin/python -m app.evaluation
-```
-
-## Setup & Environment Activation
-
-Activate the virtual environment:
-
-```bash
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-Set up environment variables:
-
-```bash
-cp .env.example .env
-# Add GEMINI_API_KEY or GOOGLE_API_KEY in .env
-```
-
-## Running Tests
-
-Run the full pytest suite (65 tests):
-
-```bash
-.venv/bin/pytest -v
-```
-
-## Running the CLI Pipeline
-
-Run the CLI pipeline demonstration:
-
-```bash
-.venv/bin/python main.py
-```
-
-## Running the FastAPI Server
-
-Start the API server with live reloading:
-
-```bash
-.venv/bin/uvicorn app.api.main:app --reload
 ```
 
 ## API Endpoints
@@ -175,7 +186,7 @@ Start the API server with live reloading:
     }
   ],
   "provider": "gemini",
-  "model": "gemini-2.5-flash",
+  "model": "gemini-3.6-flash",
   "latency_ms": 123.45
 }
 ```

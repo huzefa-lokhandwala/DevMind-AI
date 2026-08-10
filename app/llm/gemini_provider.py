@@ -23,7 +23,7 @@ load_dotenv()
 class GeminiProvider(BaseLLMProvider):
     """Google Gemini LLM provider using official google-genai SDK."""
 
-    DEFAULT_MODEL_NAME = "gemini-2.5-flash"
+    DEFAULT_MODEL_NAME = "gemini-3.6-flash"
 
     def __init__(
         self,
@@ -36,7 +36,8 @@ class GeminiProvider(BaseLLMProvider):
         Args:
             api_key: Optional Gemini API key. Defaults to environment variable
                 ``GEMINI_API_KEY`` or ``GOOGLE_API_KEY``.
-            model_name: Optional Gemini model identifier. Defaults to ``gemini-2.5-flash``.
+            model_name: Optional Gemini model identifier. Defaults to environment variable
+                ``LLM_MODEL`` or ``gemini-3.6-flash``.
             client: Optional pre-configured ``genai.Client`` (useful for mocking/testing).
         """
         self._api_key = (
@@ -44,7 +45,11 @@ class GeminiProvider(BaseLLMProvider):
             or os.getenv("GEMINI_API_KEY")
             or os.getenv("GOOGLE_API_KEY")
         )
-        self._model_name = model_name or self.DEFAULT_MODEL_NAME
+        self._model_name = (
+            model_name
+            or os.getenv("LLM_MODEL")
+            or self.DEFAULT_MODEL_NAME
+        )
 
         if client is not None:
             self._client = client
@@ -98,11 +103,32 @@ class GeminiProvider(BaseLLMProvider):
         )
 
         start_time = time.perf_counter()
-        response = self._client.models.generate_content(
-            model=self._model_name,
-            contents=prompt_body,
-            config=config,
-        )
+        max_retries = 3
+        backoff_sec = 1.0
+
+        for attempt in range(1, max_retries + 1):
+            try:
+                response = self._client.models.generate_content(
+                    model=self._model_name,
+                    contents=prompt_body,
+                    config=config,
+                )
+                break
+            except genai.errors.APIError as exc:
+                code = getattr(exc, "code", None)
+                if code in (503, 429, 500, 502, 504) and attempt < max_retries:
+                    logger.warning(
+                        "Gemini API transient error (%s: %s). Retrying attempt %d/%d after %.1fs...",
+                        code,
+                        exc.message,
+                        attempt,
+                        max_retries,
+                        backoff_sec,
+                    )
+                    time.sleep(backoff_sec)
+                    backoff_sec *= 2.0
+                else:
+                    raise
         latency_ms = (time.perf_counter() - start_time) * 1000.0
 
         answer = response.text or ""

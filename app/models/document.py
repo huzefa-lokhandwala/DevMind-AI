@@ -36,3 +36,13 @@ class Document:
     embedding: Optional[list] = field(default=None)
 
     similarity_score: Optional[float] = None
+
+    imports: list[str] = field(default_factory=list)
+
+    imported_symbols: list[str] = field(default_factory=list)
+
+    function_calls: list[str] = field(default_factory=list)
+
+    exported_symbols: list[str] = field(default_factory=list)
+
+    evidence_level: Optional[str] = None  # "HIGH", "MEDIUM", "LOW"

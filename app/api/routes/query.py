@@ -6,6 +6,7 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
+from google import genai
 from app.api.schemas.query import QueryRequest, QueryResponse
 from app.services.rag_service import RAGService, RepositoryNotIndexedError
 
@@ -45,6 +46,12 @@ def query_repository(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
+        ) from exc
+    except genai.errors.APIError as exc:
+        logger.error("Gemini API error (%s) (502 Bad Gateway): %s", getattr(exc, "code", "APIError"), exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Gemini API error ({getattr(exc, 'code', 502)}): {getattr(exc, 'message', str(exc))}",
         ) from exc
     except ValueError as exc:
         err_msg = str(exc)

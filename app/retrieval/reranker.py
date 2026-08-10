@@ -55,6 +55,7 @@ class CodeReranker:
 
         limit = top_k or self.config.final_k
         query_tokens = self.matcher.tokenize(query)
+        is_impl_query = self._is_implementation_query(query)
 
         scored_candidates: list[tuple[float, SearchResult]] = []
 
@@ -71,11 +72,15 @@ class CodeReranker:
             # 3. Symbol Boost Signal (0.0 or 1.0)
             symbol_boost_signal = self.matcher.detect_symbol_match(query_tokens, doc)
 
-            # 4. Combined Score Calculation
+            # 4. Code Category Modifier
+            category_modifier = self._get_category_modifier(doc.file_path, is_impl_query)
+
+            # 5. Combined Score Calculation
             combined_score = (
                 (self.config.semantic_weight * norm_semantic)
                 + (self.config.keyword_weight * lexical_score)
                 + (self.config.symbol_boost * symbol_boost_signal)
+                + category_modifier
             )
 
             # Clamp final score into standard [0.0, 1.0] range
@@ -103,3 +108,55 @@ class CodeReranker:
         )
 
         return reranked_results
+
+    def _is_implementation_query(self, query: str) -> bool:
+        """Check if query is asking for code implementation, definition, or flow."""
+        q_lower = query.lower()
+        keywords = {
+            "where", "how", "implemented", "implementation", "calculated",
+            "calculation", "code", "function", "class", "module", "api",
+            "route", "model", "schema", "trace", "show", "definition", "source",
+            "page", "prisma", "models"
+        }
+        return any(kw in q_lower for kw in keywords)
+
+    def _get_category_modifier(self, doc_path: str, is_impl_query: bool) -> float:
+        """Compute score modifier based on code category and query intent."""
+        path_lower = (doc_path or "").lower()
+
+        is_test = (
+            "test" in path_lower
+            or path_lower.endswith(".test.ts")
+            or path_lower.endswith(".test.js")
+            or path_lower.endswith(".test.py")
+            or path_lower.endswith("_test.py")
+            or path_lower.endswith(".spec.ts")
+            or path_lower.endswith(".spec.js")
+        )
+        is_doc = (
+            path_lower.endswith(".md")
+            or path_lower.endswith(".rst")
+            or path_lower.endswith(".txt")
+            or "/docs/" in path_lower
+            or "readme" in path_lower
+            or "architecture" in path_lower
+            or "api_docs" in path_lower
+        )
+        is_config = (
+            path_lower.endswith(".json")
+            or path_lower.endswith(".yaml")
+            or path_lower.endswith(".yml")
+            or "config" in path_lower
+            or path_lower.endswith("openapi.json")
+        )
+
+        if is_impl_query:
+            if is_test:
+                return -0.15
+            if is_doc:
+                return -0.12
+            if is_config:
+                return -0.08
+            return 0.10
+
+        return 0.0

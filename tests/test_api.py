@@ -53,6 +53,16 @@ def test_health_endpoint(client: TestClient) -> None:
     }
 
 
+def test_health_ready_endpoint(client: TestClient) -> None:
+    """Test GET /health/ready returns readiness status."""
+    response = client.get("/health/ready")
+    assert response.status_code in (200, 503)
+    if response.status_code == 200:
+        assert response.json()["status"] == "ready"
+        assert response.json()["database"] == "connected"
+
+
+
 def test_query_before_indexing(client: TestClient) -> None:
     """Test POST /query before repository indexing returns 400 Bad Request."""
     response = client.post(
@@ -157,7 +167,7 @@ def test_query_after_github_indexing_success(mock_clone: MagicMock, client: Test
 
     assert "login()" in data["answer"]
     assert data["provider"] == "gemini"
-    assert data["model"] == "gemini-2.5-flash"
+    assert data["model"] == GeminiProvider.DEFAULT_MODEL_NAME
     assert len(data["sources"]) > 0
 
 
@@ -178,7 +188,7 @@ def test_query_after_indexing_success(client: TestClient) -> None:
 
     assert "login()" in data["answer"]
     assert data["provider"] == "gemini"
-    assert data["model"] == "gemini-2.5-flash"
+    assert data["model"] == GeminiProvider.DEFAULT_MODEL_NAME
     assert data["latency_ms"] >= 0.0
 
     sources = data["sources"]

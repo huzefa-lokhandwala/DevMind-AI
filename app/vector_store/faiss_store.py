@@ -135,12 +135,18 @@ class FAISSVectorStore:
             len(self._documents),
         )
 
-    def search(self, query_embedding: list[float], k: int = 5) -> list[tuple[Document, float]]:
+    def search(
+        self,
+        query_embedding: list[float],
+        k: int = 5,
+        repository_name: str | None = None,
+    ) -> list[tuple[Document, float]]:
         """Perform semantic similarity search for a query embedding.
 
         Args:
             query_embedding: Dense vector representation of query string.
             k: Maximum number of top matching documents to return.
+            repository_name: Optional repository name filter for multi-tenant isolation.
 
         Returns:
             List of (Document, similarity_score) tuples sorted by similarity.
@@ -155,20 +161,24 @@ class FAISSVectorStore:
                 f"FAISS index dimension ({self._dimension})."
             )
 
-        k = max(1, min(k, self._index.ntotal))
+        k_fetch = max(1, min(k * 3 if repository_name else k, self._index.ntotal))
 
         # Format and L2-normalize query vector
         query_matrix = np.array([query_embedding], dtype=np.float32)
         faiss.normalize_L2(query_matrix)
 
-        scores, indices = self._index.search(query_matrix, k)
+        scores, indices = self._index.search(query_matrix, k_fetch)
 
         results: list[tuple[Document, float]] = []
         for score, idx in zip(scores[0], indices[0], strict=True):
             if idx < 0 or idx >= len(self._documents):
                 continue
             doc = self._documents[idx]
+            if repository_name and doc.repository_name != repository_name:
+                continue
             results.append((doc, float(score)))
+            if len(results) >= k:
+                break
 
         logger.info("FAISS search returned %d document(s) for top-k=%d", len(results), k)
         return results

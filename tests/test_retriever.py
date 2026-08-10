@@ -103,3 +103,47 @@ def test_document_remains_unmutated() -> None:
 
     assert len(results) == 1
     assert results[0].document.similarity_score is None  # Pristine document
+
+
+def test_retrieve_prioritizes_production_source_over_tests_and_docs() -> None:
+    """Verify that implementation queries prioritize production source files over test files and docs."""
+    prod_doc = Document(
+        content="export class VerificationEngine { generateProofHash() { return '0x123'; } }",
+        file_name="engine.ts",
+        file_path="lib/verification/engine.ts",
+        extension=".ts",
+        repository_name="proofos",
+        chunk_type="file",
+        class_name="VerificationEngine",
+        start_line=1,
+        end_line=20,
+    )
+    test_doc = Document(
+        content="describe('VerificationEngine', () => { it('should generate proof hash', () => {}); });",
+        file_name="verification.test.ts",
+        file_path="tests/verification.test.ts",
+        extension=".ts",
+        repository_name="proofos",
+        chunk_type="file",
+        class_name=None,
+        start_line=1,
+        end_line=25,
+    )
+
+    mock_engine = MagicMock(spec=EmbeddingEngine)
+    mock_engine.embed_query.return_value = [0.1, 0.2, 0.3, 0.4]
+
+    mock_store = MagicMock(spec=FAISSVectorStore)
+    # Simulate test file initially getting slightly higher semantic score due to dense keyword matches
+    mock_store.search.return_value = [(test_doc, 0.70), (prod_doc, 0.65)]
+
+    config = RetrievalConfig(enable_reranking=True, similarity_threshold=0.0)
+    retriever = Retriever(mock_engine, mock_store, config=config)
+    results = retriever.retrieve("Where is VerificationEngine implemented?", k=2)
+
+    assert len(results) == 2
+    assert results[0].document.file_path == "lib/verification/engine.ts"
+    assert results[0].rank == 1
+    assert results[1].document.file_path == "tests/verification.test.ts"
+    assert results[1].rank == 2
+

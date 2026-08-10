@@ -29,9 +29,14 @@ class ContextAssembler:
 
     DEFAULT_SYSTEM_PROMPT = (
         "You are DevMind AI, an expert Senior Software Engineer and Codebase Assistant.\n"
-        "Answer the user's question using ONLY the provided code chunks and citations below.\n"
-        "If the information is not present in the context, explicitly state that you do not know.\n"
-        "Always reference the relevant file names, line numbers, and function names in your explanation."
+        "STRICT GROUNDING & EXECUTION FLOW RULES:\n"
+        "1. Answer using ONLY the retrieved code chunks below as verified ground truth.\n"
+        "2. NEVER claim function A calls function B unless explicit call/import evidence exists in the retrieved context.\n"
+        "3. NEVER merge separate API routes (e.g. /api/verify vs /api/sync/github) into a single flow unless call graph evidence proves one route calls the other. Always present distinct API entry points as separate execution flows (FLOW A, FLOW B).\n"
+        "4. NEVER describe a hash as deterministic if runtime-varying input like Date.now() participates.\n"
+        "5. NEVER claim cryptographic asymmetric key signing unless actual private key signing material is present.\n"
+        "6. Provide precise source citations with line ranges (e.g. `lib/verification/engine.ts:20-45`).\n"
+        "7. Clearly label any unverified inference or missing context."
     )
 
     def __init__(self, system_prompt: str | None = None) -> None:
@@ -92,21 +97,50 @@ class ContextAssembler:
                 else "-"
             )
             symbol_name = doc.function_name or doc.class_name or "-"
-
+            evidence_lvl = getattr(doc, "evidence_level", "HIGH") or "HIGH"
             header = (
                 f"--- [Chunk {new_rank}] "
                 f"Repository: {doc.repository_name} | "
-                f"File: {doc.file_name} | "
+                f"File: {doc.file_path}:{line_str} | "
                 f"Symbol: {symbol_name} | "
-                f"Lines: {line_str} ---"
+                f"Evidence: {evidence_lvl} ---"
             )
-            block = f"{header}\n{doc.content.strip()}\n"
+            raw_content = doc.content.strip()
+            block = f"{header}\n{raw_content}\n"
 
             if max_chars is not None and (current_length + len(block) > max_chars):
+                avail_space = max_chars - current_length
+                header_overhead = len(header) + 1
+                avail_content_chars = avail_space - header_overhead - 20
+
+                if avail_content_chars >= 50:
+                    truncated_content = (
+                        raw_content[:avail_content_chars].rstrip()
+                        + "\n... [truncated]"
+                    )
+                    block = f"{header}\n{truncated_content}\n"
+                    context_blocks.append(block)
+                    current_length += len(block)
+                    citations.append(
+                        {
+                            "rank": new_rank,
+                            "score": round(res.score, 4),
+                            "repository": doc.repository_name,
+                            "file_name": doc.file_name,
+                            "file_path": doc.file_path,
+                            "chunk_type": doc.chunk_type,
+                            "function_name": doc.function_name,
+                            "class_name": doc.class_name,
+                            "start_line": doc.start_line,
+                            "end_line": doc.end_line,
+                        }
+                    )
+
                 logger.warning(
-                    "Context limit reached (%d chars). Truncating remaining %d chunk(s).",
+                    "Context limit reached (%d chars). Truncated chunk %d and stopping remaining %d chunk(s).",
                     max_chars,
-                    len(deduped_results) - new_rank + 1,
+                    new_rank,
+                    len(deduped_results) - new_rank,
                 )
                 break
 

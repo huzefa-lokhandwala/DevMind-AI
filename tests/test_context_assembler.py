@@ -90,3 +90,18 @@ def test_assemble_empty_results() -> None:
 
     assert prompt_ctx.retrieved_context == "No relevant code context found."
     assert prompt_ctx.citations == []
+
+
+def test_assemble_truncates_large_single_chunk_to_fit_max_chars() -> None:
+    """Verify that chunks larger than max_chars are truncated and included rather than dropped completely."""
+    large_code = "console.log('line');\n" * 500  # ~10,000 chars
+    res = _make_search_result(1, 0.95, large_code, file_name="seed.ts", function_name="main")
+
+    assembler = ContextAssembler()
+    prompt_ctx = assembler.assemble("What does seed.ts do?", [res], max_chars=1000)
+
+    assert len(prompt_ctx.citations) == 1
+    assert prompt_ctx.citations[0]["file_name"] == "seed.ts"
+    assert "seed.ts" in prompt_ctx.retrieved_context
+    assert "[truncated]" in prompt_ctx.retrieved_context
+    assert len(prompt_ctx.retrieved_context) <= 1000

@@ -1,0 +1,42 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: devmind-postgres
+    restart: always
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-devmind}
+      POSTGRES_USER: ${POSTGRES_USER:-devmind}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-devmind_local}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-devmind} -d ${POSTGRES_DB:-devmind}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: devmind-app
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-devmind}
+      POSTGRES_USER: ${POSTGRES_USER:-devmind}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-devmind_local}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-devmind}:${POSTGRES_PASSWORD:-devmind_local}@db:5432/${POSTGRES_DB:-devmind}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  postgres_data:

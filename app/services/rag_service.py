@@ -3,13 +3,24 @@
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy.orm import Session
+
 from app.chunking.code_chunker import CodeChunker
+from app.db.crud import (
+    create_or_update_repository,
+    get_repository_by_name,
+    save_query_log,
+    save_repository_documents,
+)
+from app.db.database import SessionLocal
 from app.embeddings.embedding_engine import EmbeddingEngine
 from app.llm.gemini_provider import GeminiProvider
 from app.loaders import GitHubLoaderError, GitHubRepositoryLoader, RepositoryLoader
+from app.models.document import Document
 from app.prompts.context_assembler import ContextAssembler
 from app.retrieval.retriever import Retriever
 from app.vector_store.faiss_store import FAISSVectorStore
@@ -29,13 +40,14 @@ class RAGService:
     """Stateful runtime service managing the RAG pipeline lifecycle.
 
     Reuses EmbeddingEngine and GeminiProvider across requests to avoid model re-initialization.
-    Maintains active FAISS vector store state for semantic code queries.
+    Maintains active FAISS vector store state for semantic code queries and persists database metadata.
     """
 
     def __init__(
         self,
         embedding_engine: EmbeddingEngine | None = None,
         llm_provider: GeminiProvider | None = None,
+        db_session: Session | None = None,
     ) -> None:
         """Initialize RAGService components once at application startup."""
         logger.info("Initializing RAGService lifecycle...")
@@ -43,6 +55,7 @@ class RAGService:
         self.llm_provider = llm_provider or GeminiProvider()
         self.context_assembler = ContextAssembler()
         self.chunker = CodeChunker()
+        self.db_session = db_session
 
         # Runtime indexed state
         self.vector_store: FAISSVectorStore | None = None
@@ -58,11 +71,85 @@ class RAGService:
             and self.vector_store.total_documents > 0
         )
 
-    def index_repository(self, repository_path: str) -> dict[str, Any]:
-        """Index a local repository for RAG retrieval.
+    def _get_db_session(self) -> tuple[Session, bool]:
+        """Obtain active database session and flag indicating if session should be closed."""
+        if self.db_session is not None:
+            return self.db_session, False
+        return SessionLocal(), True
+
+    def _persist_indexed_repository(
+        self,
+        repository_name: str,
+        source: str,
+        source_type: str,
+        embedded_chunks: list[Document],
+    ) -> None:
+        """Helper to save repository metadata, files, and chunks to PostgreSQL."""
+        try:
+            db, auto_close = self._get_db_session()
+            try:
+                repo_model = create_or_update_repository(
+                    db=db,
+                    name=repository_name,
+                    source=source,
+                    source_type=source_type,
+                    status="indexed",
+                )
+                save_repository_documents(
+                    db=db,
+                    repository_id=repo_model.id,
+                    documents=embedded_chunks,
+                )
+                logger.info("Successfully persisted repository '%s' to database", repository_name)
+            finally:
+                if auto_close:
+                    db.close()
+        except Exception as exc:
+            logger.warning("Database persistence failed for repository '%s': %s", repository_name, exc)
+
+    def _persist_query_log(
+        self,
+        question: str,
+        answer: str,
+        provider: str | None,
+        model: str | None,
+        latency_ms: float | None,
+    ) -> None:
+        """Helper to save query log to PostgreSQL."""
+        try:
+            db, auto_close = self._get_db_session()
+            try:
+                repo_id: int | None = None
+                if self.indexed_repository_name:
+                    repo_model = get_repository_by_name(db, self.indexed_repository_name)
+                    if repo_model:
+                        repo_id = repo_model.id
+
+                save_query_log(
+                    db=db,
+                    question=question,
+                    answer=answer,
+                    repository_id=repo_id,
+                    provider=provider,
+                    model=model,
+                    latency_ms=latency_ms,
+                )
+                logger.info("Successfully saved query history log to database")
+            finally:
+                if auto_close:
+                    db.close()
+        except Exception as exc:
+            logger.warning("Database persistence failed for query history: %s", exc)
+
+    def index_repository(
+        self, repository_path: str, source_type: str = "local", source_override: str | None = None
+    ) -> dict[str, Any]:
+        """Index a local repository for RAG retrieval and persist to database.
 
         Args:
             repository_path: Path to the target local repository folder.
+            source_type: Metadata classification ('local' or 'github').
+            source_override: Optional source location string if different from repository_path.
 
         Returns:
             Dictionary payload describing indexing statistics.
@@ -91,12 +178,25 @@ class RAGService:
         vector_store = FAISSVectorStore()
         vector_store.build_index(embedded_chunks)
 
-        retriever = Retriever(self.embedding_engine, vector_store)
+        from app.graph.code_graph import CodeGraph
+        code_graph = CodeGraph()
+        code_graph.build_from_documents(chunks)
+
+        retriever = Retriever(self.embedding_engine, vector_store, code_graph=code_graph)
 
         # Update service runtime state
         self.vector_store = vector_store
         self.retriever = retriever
         self.indexed_repository_name = loader.repository_name
+
+        # Persist to relational database layer
+        source_loc = source_override or str(path)
+        self._persist_indexed_repository(
+            repository_name=loader.repository_name,
+            source=source_loc,
+            source_type=source_type,
+            embedded_chunks=embedded_chunks,
+        )
 
         logger.info(
             "Indexed repository '%s': %d files, %d chunks, %d embeddings",
@@ -115,7 +215,7 @@ class RAGService:
         }
 
     def index_github_repository(self, github_url: str) -> dict[str, Any]:
-        """Index a public GitHub repository by URL.
+        """Index a public GitHub repository by URL and persist to database.
 
         Args:
             github_url: Validated HTTPS URL for a public GitHub repository.
@@ -132,7 +232,9 @@ class RAGService:
         except GitHubLoaderError as exc:
             raise InvalidRepositoryError(str(exc)) from exc
 
-        return self.index_repository(str(local_repo_path))
+        return self.index_repository(
+            str(local_repo_path), source_type="github", source_override=github_url
+        )
 
     def query(self, query_text: str, top_k: int = 5) -> dict[str, Any]:
         """Query the currently indexed repository.
@@ -157,9 +259,28 @@ class RAGService:
         if not query_clean:
             raise ValueError("Query string must not be empty or whitespace-only.")
 
-        search_results = self.retriever.retrieve(query_clean, k=top_k)
+        t0 = time.perf_counter()
+        search_results = self.retriever.retrieve(
+            query_clean, k=top_k, repository_name=self.indexed_repository_name
+        )
+        t1 = time.perf_counter()
         prompt_context = self.context_assembler.assemble(query_clean, search_results)
+        t2 = time.perf_counter()
         llm_response = self.llm_provider.generate(prompt_context)
+        t3 = time.perf_counter()
+
+        retrieval_ms = round((t1 - t0) * 1000, 2)
+        assembly_ms = round((t2 - t1) * 1000, 2)
+        generation_ms = round((t3 - t2) * 1000, 2)
+        total_latency_ms = round((t3 - t0) * 1000, 2)
+
+        logger.info(
+            "Query Latency Breakdown: retrieval=%.2fms, assembly=%.2fms, generation=%.2fms (total=%.2fms)",
+            retrieval_ms,
+            assembly_ms,
+            generation_ms,
+            total_latency_ms,
+        )
 
         sources: list[dict[str, Any]] = []
         for res in search_results:
@@ -175,6 +296,15 @@ class RAGService:
                     "score": round(res.score, 4),
                 }
             )
+
+        # Persist query log to database
+        self._persist_query_log(
+            question=query_clean,
+            answer=llm_response.answer,
+            provider=llm_response.provider,
+            model=llm_response.model,
+            latency_ms=llm_response.latency_ms,
+        )
 
         return {
             "answer": llm_response.answer,
