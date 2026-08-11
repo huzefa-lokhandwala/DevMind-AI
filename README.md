@@ -100,6 +100,31 @@ Where:
    .venv/bin/uvicorn app.api.main:app --reload
    ```
 
+## Production Deployment & CI/CD Pipeline
+
+### Unified Single-Command Docker Stack:
+To run the full production containerized application (FastAPI backend + Next.js frontend + pgvector PostgreSQL):
+
+```bash
+docker compose up --build -d
+```
+- **Frontend Workspace**: [http://localhost:3000](http://localhost:3000)
+- **Backend API**: [http://localhost:8000](http://localhost:8000)
+
+### Production Container Profile:
+For production environments with resource limits, log rotation, and strict security:
+
+```bash
+cp .env.production.example .env
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up --build -d
+```
+
+### GitHub Actions CI/CD Pipeline (`.github/workflows/ci-cd.yml`):
+Every push or pull-request to `main` triggers automated validation:
+- **Backend**: Runs Python 3.12 pytest suite against live PostgreSQL + pgvector container.
+- **Frontend**: Runs Node 20 Vitest unit tests and builds Next.js production standalone bundle.
+- **Docker**: Validates `docker compose config` and container image compilation.
+
 ## RAG Evaluation Benchmark
 
 DevMind AI includes an automated, offline evaluation benchmark (`app/evaluation`) measuring standard information retrieval metrics against ground-truth codebase questions.

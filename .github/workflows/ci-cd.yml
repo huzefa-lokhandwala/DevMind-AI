@@ -1,0 +1,89 @@
+name: DevMind AI CI/CD Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  backend-test:
+    name: Backend Test Suite (Python 3.12 + Pytest)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: devmind
+          POSTGRES_USER: devmind
+          POSTGRES_PASSWORD: devmind_local
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U devmind -d devmind"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Backend Pytest Suite
+        env:
+          DATABASE_URL: postgresql+psycopg://devmind:devmind_local@localhost:5432/devmind
+          DEVMIND_ENV: testing
+        run: |
+          pytest -v
+
+  frontend-test-and-build:
+    name: Frontend Test & Standalone Build (Node.js 20 + Next.js)
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: ./frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Frontend Dependencies
+        run: npm ci
+
+      - name: Run Vitest Unit Tests
+        run: npx vitest run
+
+      - name: Build Next.js Production App
+        run: npm run build
+
+  docker-compose-build:
+    name: Docker Compose Build Verification
+    needs: [backend-test, frontend-test-and-build]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate Docker Compose Configuration
+        run: docker compose config
+
+      - name: Build Docker Stack Images
+        run: docker compose build
