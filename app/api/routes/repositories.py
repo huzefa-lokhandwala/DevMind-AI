@@ -6,6 +6,7 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
+from app.api.auth import verify_api_key
 from app.api.schemas.repository import IndexRepositoryRequest, IndexRepositoryResponse
 from app.loaders import GitHubLoaderError
 from app.services.rag_service import InvalidRepositoryError, RAGService
@@ -24,6 +25,7 @@ def get_rag_service(request: Request) -> RAGService:
     "/index",
     response_model=IndexRepositoryResponse,
     status_code=status.HTTP_200_OK,
+    dependencies=[Depends(verify_api_key)],
 )
 def index_repository(
     payload: IndexRepositoryRequest,

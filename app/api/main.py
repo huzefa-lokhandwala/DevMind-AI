@@ -8,8 +8,11 @@ from typing import AsyncGenerator
 
 from fastapi import FastAPI
 
+from fastapi.middleware.cors import CORSMiddleware
+
 from app.api.routes import health, query, repositories
 from app.services.rag_service import RAGService
+from app.utils.config import get_cors_origins
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("devmind_api")
@@ -29,6 +32,18 @@ app = FastAPI(
     description="Code-aware RAG backend for semantic codebase search and Q&A",
     version="1.0.0",
     lifespan=lifespan,
+)
+
+# Configure CORS Middleware
+origins = get_cors_origins()
+logger.info("Configuring CORS middleware with origins: %s", origins)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "OPTIONS", "PUT", "DELETE"],
+    allow_headers=["Content-Type", "X-API-Key", "Authorization", "Accept"],
 )
 
 # Register endpoint routers

@@ -32,10 +32,35 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-devmind}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-devmind_local}
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-devmind}:${POSTGRES_PASSWORD:-devmind_local}@db:5432/${POSTGRES_DB:-devmind}
+      DEVMIND_ENV: ${DEVMIND_ENV:-development}
+      DEVMIND_API_KEY: ${DEVMIND_API_KEY:-}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
     depends_on:
       db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+    container_name: devmind-frontend
+    restart: always
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+    depends_on:
+      app:
         condition: service_healthy
 
 volumes:

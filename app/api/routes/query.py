@@ -7,6 +7,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from google import genai
+from app.api.auth import verify_api_key
 from app.api.schemas.query import QueryRequest, QueryResponse
 from app.services.rag_service import RAGService, RepositoryNotIndexedError
 
@@ -24,6 +25,7 @@ def get_rag_service(request: Request) -> RAGService:
     "/query",
     response_model=QueryResponse,
     status_code=status.HTTP_200_OK,
+    dependencies=[Depends(verify_api_key)],
 )
 def query_repository(
     payload: QueryRequest,

@@ -15,3 +15,5 @@ data/
 *.db
 *.sqlite3
 alembic/__pycache__/
+frontend/node_modules/
+frontend/.next/
