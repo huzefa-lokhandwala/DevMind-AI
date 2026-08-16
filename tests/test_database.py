@@ -195,7 +195,7 @@ def test_crud_save_repository_documents(db_session):
         function_name="hello",
         start_line=1,
         end_line=2,
-        embedding=[0.1] * 384,
+        embedding=[0.1] * 768,
     )
 
     files_saved, chunks_saved = save_repository_documents(
@@ -231,12 +231,22 @@ def test_crud_save_query_log(db_session):
 
 def test_rag_service_db_integration(db_session, tmp_path):
     """Test RAGService indexing and querying with injected DB session."""
+    from unittest.mock import MagicMock
+    from app.embeddings.embedding_engine import EmbeddingEngine
+    from google.genai import types
+
     # Create sample repository file
     code_dir = tmp_path / "sample_code"
     code_dir.mkdir()
     (code_dir / "app.py").write_text("def run():\n    print('Running app')\n")
 
-    rag_service = RAGService(db_session=db_session)
+    mock_client = MagicMock()
+    mock_client.models.embed_content.return_value = types.EmbedContentResponse(
+        embeddings=[types.ContentEmbedding(values=[0.1] * 768)]
+    )
+    mock_engine = EmbeddingEngine(client=mock_client)
+
+    rag_service = RAGService(embedding_engine=mock_engine, db_session=db_session)
     res = rag_service.index_repository(str(code_dir))
 
     assert res["status"] == "indexed"

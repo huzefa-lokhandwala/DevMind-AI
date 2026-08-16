@@ -9,12 +9,14 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.api.main import app
+from app.embeddings.embedding_engine import EmbeddingEngine
 from app.llm.gemini_provider import GeminiProvider
+from google.genai import types
 
 
 @pytest.fixture
 def client() -> TestClient:
-    """Create a TestClient with a mocked GeminiProvider and clean RAG state."""
+    """Create a TestClient with mocked GeminiProvider and EmbeddingEngine and clean RAG state."""
     with TestClient(app) as test_client:
         mock_client = MagicMock()
         mock_response = MagicMock()
@@ -28,11 +30,25 @@ def client() -> TestClient:
         mock_response.candidates = [MagicMock(finish_reason="STOP")]
         mock_client.models.generate_content.return_value = mock_response
 
+        def embed_side_effect(model: str, contents: str | list[str], config: types.EmbedContentConfig | None = None) -> types.EmbedContentResponse:
+            dim = config.output_dimensionality if config and config.output_dimensionality else 768
+            if isinstance(contents, str):
+                embeddings = [types.ContentEmbedding(values=[0.1] * dim)]
+            else:
+                embeddings = [
+                    types.ContentEmbedding(values=[0.1 * (i + 1)] * dim)
+                    for i in range(len(contents))
+                ]
+            return types.EmbedContentResponse(embeddings=embeddings)
+
+        mock_client.models.embed_content.side_effect = embed_side_effect
+
         # Reset runtime state between tests for test isolation
         service = test_client.app.state.rag_service
         service.vector_store = None
         service.retriever = None
         service.indexed_repository_name = None
+        service.embedding_engine = EmbeddingEngine(client=mock_client)
         service.llm_provider = GeminiProvider(client=mock_client)
 
         yield test_client

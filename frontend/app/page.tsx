@@ -120,7 +120,7 @@ export default function Home() {
                 Ask DevMind AI About Your Codebase
               </h3>
               <p className="text-xs text-zinc-400 leading-relaxed">
-                DevMind AI uses AST-aware code chunking, BAAI embeddings, hybrid FAISS search, AST CodeGraph call expansion, and Gemini 3.6 Flash for deep codebase reasoning.
+                DevMind AI uses AST-aware code chunking, Gemini embeddings, hybrid FAISS search, AST CodeGraph call expansion, and Gemini 3.6 Flash for deep codebase reasoning.
               </p>
             </div>
 

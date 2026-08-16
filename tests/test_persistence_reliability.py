@@ -36,7 +36,7 @@ def test_persistence_and_restart_reliability(memory_db) -> None:
         start_line=1,
         end_line=20,
     )
-    doc.embedding = [0.1] * 384
+    doc.embedding = [0.1] * 768
 
     # 1. Index repository and save to database
     repo_model = create_or_update_repository(memory_db, "proofos", "/app/proofos", "local")

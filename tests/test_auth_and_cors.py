@@ -17,16 +17,25 @@ def client():
     return TestClient(app)
 
 
+from app.db.database import get_db
+
+
 def test_health_endpoints_remain_publicly_accessible_without_api_key(client) -> None:
     """GET /health and GET /health/ready must remain accessible without X-API-Key header."""
-    with patch.dict(os.environ, {"DEVMIND_API_KEY": "secret_test_key_123", "DEVMIND_ENV": "production"}):
-        res_health = client.get("/health")
-        assert res_health.status_code == 200
-        assert res_health.json()["status"] == "ok"
+    mock_db = MagicMock()
+    mock_db.execute.return_value = None
+    app.dependency_overrides[get_db] = lambda: mock_db
+    try:
+        with patch.dict(os.environ, {"DEVMIND_API_KEY": "secret_test_key_123", "DEVMIND_ENV": "production"}):
+            res_health = client.get("/health")
+            assert res_health.status_code == 200
+            assert res_health.json()["status"] == "ok"
 
-        res_ready = client.get("/health/ready")
-        assert res_ready.status_code == 200
-        assert res_ready.json()["status"] == "ready"
+            res_ready = client.get("/health/ready")
+            assert res_ready.status_code == 200
+            assert res_ready.json()["status"] == "ready"
+    finally:
+        app.dependency_overrides.pop(get_db, None)
 
 
 def test_protected_endpoint_without_api_key_returns_401(client) -> None:

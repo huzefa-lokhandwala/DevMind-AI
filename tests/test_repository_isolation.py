@@ -43,14 +43,14 @@ def test_repository_isolation_filtering_in_vector_store() -> None:
         _make_document("export class AuthA {}", "auth.ts", "src/auth.ts", repository_name="repo_a"),
         _make_document("export class AuthB {}", "auth.ts", "src/auth.ts", repository_name="repo_b"),
     ]
-    doc_repo_a.embedding = [0.1] * 384
-    doc_repo_b.embedding = [0.1] * 384
+    doc_repo_a.embedding = [0.1] * 768
+    doc_repo_b.embedding = [0.1] * 768
 
     store = FAISSVectorStore()
     store.build_index([doc_repo_a, doc_repo_b])
 
     # Search for repo_a specifically
-    query_emb = [0.1] * 384
+    query_emb = [0.1] * 768
     matches_a = store.search(query_emb, k=5, repository_name="repo_a")
 
     assert len(matches_a) == 1
@@ -66,11 +66,11 @@ def test_repository_isolation_in_retriever() -> None:
     """Retriever.retrieve with repository_name filter guarantees only target repo chunks are returned."""
     doc_repo_a = _make_document("export class EngineA {}", "engine.ts", "lib/engine.ts", repository_name="repo_a")
     doc_repo_b = _make_document("export class EngineB {}", "engine.ts", "lib/engine.ts", repository_name="repo_b")
-    doc_repo_a.embedding = [0.1] * 384
-    doc_repo_b.embedding = [0.1] * 384
+    doc_repo_a.embedding = [0.1] * 768
+    doc_repo_b.embedding = [0.1] * 768
 
     mock_engine = MagicMock(spec=EmbeddingEngine)
-    mock_engine.embed_query.return_value = [0.1] * 384
+    mock_engine.embed_query.return_value = [0.1] * 768
 
     store = FAISSVectorStore()
     store.build_index([doc_repo_a, doc_repo_b])

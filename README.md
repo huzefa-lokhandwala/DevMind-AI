@@ -6,7 +6,7 @@
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688.svg?style=flat&logo=fastapi)](https://fastapi.tiangolo.com)
 [![Next.js](https://img.shields.io/badge/Next.js-16.3-black.svg?style=flat&logo=next.js)](https://nextjs.org)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16%20%2B%20pgvector-blue.svg?style=flat&logo=postgresql)](https://github.com/pgvector/pgvector)
-[![Pytest](https://img.shields.io/badge/Pytest-114%20Passed-success.svg?style=flat&logo=pytest)](https://pytest.org)
+[![Pytest](https://img.shields.io/badge/Pytest-119%20Passed-success.svg?style=flat&logo=pytest)](https://pytest.org)
 
 ---
 
@@ -14,7 +14,7 @@
 
 DevMind AI enables software developers, tech leads, and security auditors to ask natural-language questions about complex codebases and receive factually grounded, line-cited answers.
 
-By combining **AST structural code chunking**, **384-dimensional vector embeddings**, **hybrid semantic/lexical reranking**, and **AST CodeGraph dependency traversal**, DevMind AI bridges the gap between raw vector search and true multi-file code execution flow tracing.
+By combining **AST structural code chunking**, **768-dimensional Gemini vector embeddings**, **hybrid semantic/lexical reranking**, and **AST CodeGraph dependency traversal**, DevMind AI bridges the gap between raw vector search and true multi-file code execution flow tracing.
 
 ---
 
@@ -61,7 +61,7 @@ For full specifications and sequence flow diagrams, view [docs/ARCHITECTURE.md](
 ## 4. Technology Stack
 
 - **Backend**: Python 3.12, FastAPI 0.115, Uvicorn, Pydantic v2, SQLAlchemy 2.0, Alembic.
-- **AI & RAG Engine**: Google GenAI SDK (`gemini-3.6-flash`), SentenceTransformers (`BAAI/bge-small-en-v1.5`), FAISS (`faiss-cpu`), Custom AST Chunker & CodeGraph.
+- **AI & RAG Engine**: Google GenAI SDK (`gemini-3.6-flash`, `gemini-embedding-001`), FAISS (`faiss-cpu`), Custom AST Chunker & CodeGraph.
 - **Frontend**: Next.js 16 (App Router), React 19, TypeScript, TailwindCSS, Lucide Icons, React Markdown.
 - **Database**: PostgreSQL 16 with `pgvector` extension.
 - **Containerization & CI/CD**: Docker, Docker Compose, GitHub Actions.
@@ -78,7 +78,7 @@ DevMind-AI/
 │   │   └── routes/             # Endpoint Handlers (/health, /query, /repositories/index)
 │   ├── chunking/               # AST Structural Code Chunker
 │   ├── db/                     # SQLAlchemy ORM Models & Session Management
-│   ├── embeddings/             # BAAI/bge-small-en-v1.5 Embedding Engine
+│   ├── embeddings/             # Gemini 768d Embedding Engine
 │   ├── evaluation/             # RAG Benchmark Metrics Evaluator
 │   ├── graph/                  # AST CodeGraph Node & Dependency Edge Traversal
 │   ├── llm/                    # Gemini Provider Interface
@@ -199,7 +199,7 @@ For complete payload schemas, curl examples, and status code specifications, vie
 2. `GitHubRepositoryLoader` validates URL format, domain, and HTTPS scheme.
 3. The repo is cloned via shallow depth (`--depth 1`) into `data/cloned_repos/owner/repo`.
 4. `CodeChunker` parses source files into AST function/class chunks.
-5. `EmbeddingEngine` generates 384d vector embeddings and stores them in FAISS and PostgreSQL `pgvector`.
+5. `EmbeddingEngine` generates 768d vector embeddings and stores them in FAISS and PostgreSQL `pgvector`.
 
 ---
 
@@ -217,7 +217,7 @@ For complete payload schemas, curl examples, and status code specifications, vie
 
 ## 11. Testing & Quality Assurance
 
-- **Backend Pytest Suite**: 114 tests passing (`.venv/bin/python -m pytest -v`).
+- **Backend Pytest Suite**: 119 tests passing (`.venv/bin/python -m pytest -v`).
 - **Frontend Vitest Suite**: 8 tests passing (`cd frontend && npx vitest run`).
 - **Next.js Production Build**: Standalone output verification (`cd frontend && npm run build`).
 - **Docker Validation**: `docker compose config`.

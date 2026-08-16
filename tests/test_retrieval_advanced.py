@@ -31,7 +31,7 @@ def sample_documents() -> list[Document]:
             function_name="login",
             start_line=1,
             end_line=2,
-            embedding=[0.1] * 384,
+            embedding=[0.1] * 768,
         ),
         Document(
             content="def add(a, b):\n    return a + b",
@@ -44,7 +44,7 @@ def sample_documents() -> list[Document]:
             function_name="add",
             start_line=1,
             end_line=2,
-            embedding=[0.9] * 384,
+            embedding=[0.9] * 768,
         ),
     ]
 
@@ -98,7 +98,7 @@ def test_similarity_threshold_filtering(sample_documents: list[Document]) -> Non
     """Test filtering candidates below configured similarity threshold."""
     config = RetrievalConfig(similarity_threshold=0.50, enable_reranking=False)
     mock_engine = MagicMock(spec=EmbeddingEngine)
-    mock_engine.embed_query.return_value = [0.1] * 384
+    mock_engine.embed_query.return_value = [0.1] * 768
 
     mock_store = MagicMock(spec=FAISSVectorStore)
     mock_store.search.return_value = [
@@ -125,5 +125,5 @@ def test_retriever_empty_query_and_empty_store() -> None:
     assert retriever.retrieve("") == []
     assert retriever.retrieve("   ") == []
 
-    mock_engine.embed_query.return_value = [0.0] * 384
+    mock_engine.embed_query.return_value = [0.0] * 768
     assert retriever.retrieve("valid query") == []

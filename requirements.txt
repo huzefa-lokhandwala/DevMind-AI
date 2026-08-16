@@ -1,6 +1,5 @@
 # DevMind AI - core dependencies
 python-dotenv>=1.0.0
-sentence-transformers>=3.0.0
 faiss-cpu>=1.7.0
 google-genai>=0.1.0
 fastapi>=0.100.0

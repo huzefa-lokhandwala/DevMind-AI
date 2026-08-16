@@ -44,7 +44,7 @@ def test_adversarial_1_duplicate_symbol_across_multiple_files() -> None:
     doc2 = _make_document("export function process() { return 'v2'; }", "v2.ts", "lib/v2.ts", function_name="process")
 
     mock_engine = MagicMock(spec=EmbeddingEngine)
-    mock_engine.embed_query.return_value = [0.1] * 384
+    mock_engine.embed_query.return_value = [0.1] * 768
     mock_store = MagicMock(spec=FAISSVectorStore)
     mock_store.search.return_value = [(doc1, 0.90), (doc2, 0.85)]
 
@@ -60,7 +60,7 @@ def test_adversarial_2_nonexistent_symbol_handling() -> None:
     doc1 = _make_document("export class RealService {}", "real.ts", "lib/real.ts")
 
     mock_engine = MagicMock(spec=EmbeddingEngine)
-    mock_engine.embed_query.return_value = [0.1] * 384
+    mock_engine.embed_query.return_value = [0.1] * 768
     mock_store = MagicMock(spec=FAISSVectorStore)
     mock_store.search.return_value = [(doc1, 0.20)]  # Below threshold
 
@@ -85,7 +85,7 @@ def test_adversarial_4_misleading_documentation_vs_production_code() -> None:
     doc_doc = _make_document("## Legacy Scoring System\nUse old calculateScore()", "DEPRECATED.md", "docs/DEPRECATED.md")
 
     mock_engine = MagicMock(spec=EmbeddingEngine)
-    mock_engine.embed_query.return_value = [0.1] * 384
+    mock_engine.embed_query.return_value = [0.1] * 768
     mock_store = MagicMock(spec=FAISSVectorStore)
     mock_store.search.return_value = [(doc_doc, 0.75), (prod_doc, 0.70)]
 

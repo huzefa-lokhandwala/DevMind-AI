@@ -54,7 +54,7 @@ def test_rag_v2_condition_1_verification_engine_retrieval() -> None:
     )
 
     mock_engine = MagicMock(spec=EmbeddingEngine)
-    mock_engine.embed_query.return_value = [0.1] * 384
+    mock_engine.embed_query.return_value = [0.1] * 768
     mock_store = MagicMock(spec=FAISSVectorStore)
     mock_store.search.return_value = [(test_doc, 0.70), (prod_doc, 0.65)]
 
@@ -76,7 +76,7 @@ def test_rag_v2_condition_2_builder_scoring_retrieval() -> None:
     doc_doc = _make_document("## Builder Score System Overview", "ARCHITECTURE.md", "ARCHITECTURE.md")
 
     mock_engine = MagicMock(spec=EmbeddingEngine)
-    mock_engine.embed_query.return_value = [0.1] * 384
+    mock_engine.embed_query.return_value = [0.1] * 768
     mock_store = MagicMock(spec=FAISSVectorStore)
     mock_store.search.return_value = [(doc_doc, 0.70), (prod_doc, 0.65)]
 
@@ -98,7 +98,7 @@ def test_rag_v2_condition_3_api_verification_route() -> None:
     helper_doc = _make_document("export class GitHubPipeline {}", "githubPipeline.ts", "lib/integrations/githubPipeline.ts")
 
     mock_engine = MagicMock(spec=EmbeddingEngine)
-    mock_engine.embed_query.return_value = [0.1] * 384
+    mock_engine.embed_query.return_value = [0.1] * 768
     mock_store = MagicMock(spec=FAISSVectorStore)
     mock_store.search.return_value = [(helper_doc, 0.80), (prod_doc, 0.75)]
 
@@ -118,7 +118,7 @@ def test_rag_v2_condition_4_github_sync_route() -> None:
     )
 
     mock_engine = MagicMock(spec=EmbeddingEngine)
-    mock_engine.embed_query.return_value = [0.1] * 384
+    mock_engine.embed_query.return_value = [0.1] * 768
     mock_store = MagicMock(spec=FAISSVectorStore)
     mock_store.search.return_value = [(prod_doc, 0.85)]
 
@@ -167,7 +167,7 @@ def test_rag_v2_condition_8_passport_route_distinction() -> None:
     p3 = _make_document("export default async function UsernamePassportPage({ params }) {}", "page.tsx", "app/u/[username]/page.tsx")
 
     mock_engine = MagicMock(spec=EmbeddingEngine)
-    mock_engine.embed_query.return_value = [0.1] * 384
+    mock_engine.embed_query.return_value = [0.1] * 768
     mock_store = MagicMock(spec=FAISSVectorStore)
     mock_store.search.return_value = [(p1, 0.85), (p2, 0.82), (p3, 0.80)]
 

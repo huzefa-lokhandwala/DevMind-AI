@@ -57,7 +57,7 @@ export function IndexModal({
     try {
       // Step feedback messages
       const timer1 = setTimeout(() => setStatusMessage("Parsing AST symbols & files..."), 1500);
-      const timer2 = setTimeout(() => setStatusMessage("Creating 384d BAAI embeddings & CodeGraph..."), 3500);
+      const timer2 = setTimeout(() => setStatusMessage("Creating 768d Gemini embeddings & CodeGraph..."), 3500);
 
       const res = await indexRepository(payload);
 
