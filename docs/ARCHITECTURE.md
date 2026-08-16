@@ -21,7 +21,7 @@ graph TD
             Service -->|GitHub HTTPS URL| GHLoader[GitHubRepositoryLoader<br/>app/loaders]
             Loader --> Chunker[CodeChunker AST Parser<br/>app/chunking/code_chunker.py]
             GHLoader --> Chunker
-            Chunker --> EmbedEngine[EmbeddingEngine 768d<br/>app/embeddings]
+            Chunker --> EmbedEngine[EmbeddingEngine 384d<br/>app/embeddings]
         end
         
         subgraph Hybrid Retrieval V2 Engine
@@ -63,7 +63,7 @@ sequenceDiagram
     participant API as FastAPI (/repositories/index)
     participant Loader as RepositoryLoader / GitHubLoader
     participant Chunker as CodeChunker (AST Parser)
-    participant Embedder as EmbeddingEngine (gemini-embedding-001)
+    participant Embedder as EmbeddingEngine (BAAI/bge-small-en-v1.5)
     participant Stores as FAISS & PostgreSQL (pgvector)
     participant Graph as CodeGraph
 
@@ -73,7 +73,7 @@ sequenceDiagram
     Loader-->>API: List of raw document objects
     API->>Chunker: Parse documents (Python AST & TS/JS parser)
     Chunker-->>API: CodeChunks with line ranges & symbol metadata
-    API->>Embedder: Generate 768d vector embeddings
+    API->>Embedder: Generate 384d vector embeddings
     Embedder-->>API: Embedded CodeChunks
     API->>Stores: Add to FAISS index & persist in PostgreSQL/pgvector
     API->>Graph: Build AST dependency nodes & call edges

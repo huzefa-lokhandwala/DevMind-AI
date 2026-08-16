@@ -21,7 +21,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 import os
 from app.db.database import Base
 
-DEFAULT_EMBEDDING_DIMENSION = 768
+DEFAULT_EMBEDDING_DIMENSION = 384
 _env_dim = os.getenv("EMBEDDING_DIMENSION")
 EMBEDDING_DIMENSION = int(_env_dim) if _env_dim and _env_dim.isdigit() else DEFAULT_EMBEDDING_DIMENSION
 

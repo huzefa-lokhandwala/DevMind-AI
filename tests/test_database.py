@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.exc import IntegrityError
@@ -195,7 +196,7 @@ def test_crud_save_repository_documents(db_session):
         function_name="hello",
         start_line=1,
         end_line=2,
-        embedding=[0.1] * 768,
+        embedding=[0.1] * 384,
     )
 
     files_saved, chunks_saved = save_repository_documents(
@@ -211,6 +212,45 @@ def test_crud_save_repository_documents(db_session):
     assert stored_file.path == "src/hello.py"
     assert len(stored_file.chunks) == 1
     assert stored_file.chunks[0].function_name == "hello"
+
+
+def test_chunk_null_and_384d_embedding_persistence(db_session):
+    """Test ChunkModel permits NULL embeddings and persists 384d embeddings."""
+    repo = create_or_update_repository(db=db_session, name="test-null-repo", source="/tmp")
+    file_rec = FileModel(repository_id=repo.id, path="null_test.py")
+    db_session.add(file_rec)
+    db_session.flush()
+
+    # 1. Test NULL embedding allowed
+    chunk_null = ChunkModel(
+        file_id=file_rec.id,
+        content="def empty(): pass",
+        embedding=None,
+    )
+    db_session.add(chunk_null)
+    db_session.commit()
+    db_session.refresh(chunk_null)
+    assert chunk_null.id is not None
+    assert chunk_null.embedding is None
+
+    # 2. Test 384d embedding persisted
+    chunk_384 = ChunkModel(
+        file_id=file_rec.id,
+        content="def full(): pass",
+        embedding=[0.05] * 384,
+    )
+    db_session.add(chunk_384)
+    db_session.commit()
+    db_session.refresh(chunk_384)
+    assert chunk_384.id is not None
+    assert len(chunk_384.embedding) == 384
+
+
+def test_database_default_embedding_dimension_constant():
+    """Verify DEFAULT_EMBEDDING_DIMENSION in models.py is 384."""
+    from app.db.models import DEFAULT_EMBEDDING_DIMENSION, EMBEDDING_DIMENSION
+    assert DEFAULT_EMBEDDING_DIMENSION == 384
+    assert EMBEDDING_DIMENSION == 384
 
 
 def test_crud_save_query_log(db_session):
@@ -233,18 +273,15 @@ def test_rag_service_db_integration(db_session, tmp_path):
     """Test RAGService indexing and querying with injected DB session."""
     from unittest.mock import MagicMock
     from app.embeddings.embedding_engine import EmbeddingEngine
-    from google.genai import types
 
     # Create sample repository file
     code_dir = tmp_path / "sample_code"
     code_dir.mkdir()
     (code_dir / "app.py").write_text("def run():\n    print('Running app')\n")
 
-    mock_client = MagicMock()
-    mock_client.models.embed_content.return_value = types.EmbedContentResponse(
-        embeddings=[types.ContentEmbedding(values=[0.1] * 768)]
-    )
-    mock_engine = EmbeddingEngine(client=mock_client)
+    mock_model = MagicMock()
+    mock_model.embed.return_value = [np.array([0.1] * 384, dtype=np.float32)]
+    mock_engine = EmbeddingEngine(provider="local", local_model=mock_model)
 
     rag_service = RAGService(embedding_engine=mock_engine, db_session=db_session)
     res = rag_service.index_repository(str(code_dir))
