@@ -56,16 +56,20 @@ class LocalEmbeddingProvider(BaseEmbeddingProvider):
 
     DEFAULT_MODEL_NAME = "BAAI/bge-small-en-v1.5"
     DEFAULT_EMBEDDING_DIMENSION = 384
-    DEFAULT_BATCH_SIZE = 64
+    DEFAULT_BATCH_SIZE = 16
+    DEFAULT_THREADS = 1
 
     _cached_model: Any = None
     _cached_model_name: str | None = None
+    _cached_model_threads: int | None = None
 
     def __init__(
         self,
         model_name: str | None = None,
         dimension: int | None = None,
         model: Any | None = None,
+        threads: int | None = None,
+        batch_size: int | None = None,
     ) -> None:
         """Initialize LocalEmbeddingProvider.
 
@@ -74,6 +78,8 @@ class LocalEmbeddingProvider(BaseEmbeddingProvider):
                 environment variable ``EMBEDDING_MODEL`` or ``BAAI/bge-small-en-v1.5``.
             dimension: Expected vector dimensionality (default: 384).
             model: Optional pre-instantiated or mocked FastEmbed TextEmbedding model.
+            threads: Number of execution threads for ONNX Runtime SessionOptions (default: 1).
+            batch_size: Default embedding batch size (default: 16).
         """
         self._model_name = (
             model_name
@@ -83,10 +89,36 @@ class LocalEmbeddingProvider(BaseEmbeddingProvider):
         self._embedding_dimension = dimension or self.DEFAULT_EMBEDDING_DIMENSION
         self._model = model
 
+        # Parse thread limit for ONNX Runtime (default: 1 thread for constrained memory)
+        env_threads = os.getenv("EMBEDDING_THREADS") or os.getenv("OMP_NUM_THREADS")
+        parsed_threads = self.DEFAULT_THREADS
+        if env_threads:
+            try:
+                t = int(env_threads.strip())
+                if t > 0:
+                    parsed_threads = t
+            except (ValueError, TypeError):
+                pass
+        self._threads = threads if (threads is not None and threads > 0) else parsed_threads
+
+        # Parse default batch size
+        env_batch = os.getenv("EMBEDDING_BATCH_SIZE")
+        parsed_batch = self.DEFAULT_BATCH_SIZE
+        if env_batch:
+            try:
+                b = int(env_batch.strip())
+                if b > 0:
+                    parsed_batch = b
+            except (ValueError, TypeError):
+                pass
+        self._default_batch_size = batch_size if (batch_size is not None and batch_size > 0) else parsed_batch
+
         logger.info(
-            "LocalEmbeddingProvider initialized (model=%s, dimension=%d)",
+            "LocalEmbeddingProvider initialized (model=%s, dimension=%d, threads=%d, batch_size=%d)",
             self._model_name,
             self._embedding_dimension,
+            self._threads,
+            self._default_batch_size,
         )
 
     @property
@@ -97,19 +129,26 @@ class LocalEmbeddingProvider(BaseEmbeddingProvider):
     def embedding_dimension(self) -> int:
         return self._embedding_dimension
 
+    @property
+    def threads(self) -> int:
+        return self._threads
+
     def _get_model(self) -> Any:
         """Lazily load and cache the FastEmbed TextEmbedding model singleton."""
         if self._model is not None:
             return self._model
 
-        # Reuse shared class-level model cache if the model name matches
+        # Reuse shared class-level model cache if the model name and threads match
         if (
             LocalEmbeddingProvider._cached_model is not None
             and LocalEmbeddingProvider._cached_model_name == self._model_name
+            and LocalEmbeddingProvider._cached_model_threads == self._threads
         ):
             return LocalEmbeddingProvider._cached_model
 
-        logger.info("Loading FastEmbed model: %s", self._model_name)
+        logger.info(
+            "Loading FastEmbed model: %s (threads=%d)", self._model_name, self._threads
+        )
         try:
             from fastembed import TextEmbedding
         except ImportError as exc:
@@ -118,9 +157,10 @@ class LocalEmbeddingProvider(BaseEmbeddingProvider):
                 "FastEmbed library is not installed. Please install fastembed>=0.4.0."
             ) from exc
 
-        loaded_model = TextEmbedding(model_name=self._model_name)
+        loaded_model = TextEmbedding(model_name=self._model_name, threads=self._threads)
         LocalEmbeddingProvider._cached_model = loaded_model
         LocalEmbeddingProvider._cached_model_name = self._model_name
+        LocalEmbeddingProvider._cached_model_threads = self._threads
         logger.info("FastEmbed model '%s' loaded successfully.", self._model_name)
         return loaded_model
 
@@ -133,7 +173,7 @@ class LocalEmbeddingProvider(BaseEmbeddingProvider):
 
         Args:
             documents: Sequence of Document chunks to embed.
-            batch_size: Optional batch size for embedding iteration.
+            batch_size: Optional batch size for embedding iteration (default: 16).
 
         Returns:
             List of new Document instances containing 384-dimensional float embeddings.
@@ -142,25 +182,19 @@ class LocalEmbeddingProvider(BaseEmbeddingProvider):
             logger.info("No documents to embed")
             return []
 
-        actual_batch_size = batch_size or self.DEFAULT_BATCH_SIZE
+        actual_batch_size = batch_size or self._default_batch_size
         texts = [doc.content for doc in documents]
         logger.info(
-            "Generating local FastEmbed embeddings for %d document(s) (batch_size=%d)",
+            "Generating local FastEmbed embeddings for %d document(s) (batch_size=%d, threads=%d)",
             len(documents),
             actual_batch_size,
+            self._threads,
         )
 
         model = self._get_model()
-        # FastEmbed.embed returns an iterable of numpy arrays
-        raw_embeddings = list(model.embed(texts, batch_size=actual_batch_size))
-
-        if len(raw_embeddings) != len(documents):
-            raise RuntimeError(
-                f"Embedding count mismatch: expected {len(documents)}, got {len(raw_embeddings)}"
-            )
-
+        # Stream generator directly into Document instances to minimize intermediate list allocations
         embedded_documents: list[Document] = []
-        for doc, raw_vector in zip(documents, raw_embeddings, strict=True):
+        for doc, raw_vector in zip(documents, model.embed(texts, batch_size=actual_batch_size)):
             vector: list[float] = [float(val) for val in raw_vector]
             if len(vector) != self._embedding_dimension:
                 raise ValueError(
@@ -168,6 +202,11 @@ class LocalEmbeddingProvider(BaseEmbeddingProvider):
                     f"expected dimension ({self._embedding_dimension})."
                 )
             embedded_documents.append(replace(doc, embedding=vector))
+
+        if len(embedded_documents) != len(documents):
+            raise RuntimeError(
+                f"Embedding count mismatch: expected {len(documents)}, got {len(embedded_documents)}"
+            )
 
         logger.info(
             "Generated %d local embedding(s) with dimension %d",
@@ -403,6 +442,8 @@ class EmbeddingEngine:
         dimension: int | None = None,
         client: Any | None = None,
         local_model: Any | None = None,
+        threads: int | None = None,
+        batch_size: int | None = None,
         custom_provider: BaseEmbeddingProvider | None = None,
     ) -> None:
         """Initialize EmbeddingEngine with selected provider.
@@ -415,6 +456,8 @@ class EmbeddingEngine:
             dimension: Optional dimension override.
             client: Optional pre-configured Client (for Gemini provider).
             local_model: Optional pre-configured TextEmbedding model (for Local provider).
+            threads: Optional thread limit for ONNX Runtime (Local provider).
+            batch_size: Optional default batch size (Local provider).
             custom_provider: Optional injected BaseEmbeddingProvider instance.
         """
         if custom_provider is not None:
@@ -434,6 +477,8 @@ class EmbeddingEngine:
                 model_name=model_name,
                 dimension=dimension,
                 model=local_model,
+                threads=threads,
+                batch_size=batch_size,
             )
         elif resolved_provider == "gemini":
             self._provider = GeminiEmbeddingProvider(

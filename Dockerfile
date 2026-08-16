@@ -3,7 +3,10 @@ FROM python:3.12-slim
 
 # Prevent Python from writing .pyc files and enable unbuffered logging
 ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
+    PYTHONDONTWRITEBYTECODE=1 \
+    OMP_NUM_THREADS=1 \
+    EMBEDDING_THREADS=1 \
+    EMBEDDING_BATCH_SIZE=16
 
 WORKDIR /app
 

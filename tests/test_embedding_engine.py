@@ -158,15 +158,17 @@ def test_local_provider_model_caching_singleton() -> None:
     # Save previous cache
     prev_model = LocalEmbeddingProvider._cached_model
     prev_name = LocalEmbeddingProvider._cached_model_name
+    prev_threads = LocalEmbeddingProvider._cached_model_threads
     try:
         with patch("fastembed.TextEmbedding", return_value=mock_model_instance) as mock_text_embedding_cls:
             LocalEmbeddingProvider._cached_model = None
             LocalEmbeddingProvider._cached_model_name = None
+            LocalEmbeddingProvider._cached_model_threads = None
 
-            provider_1 = LocalEmbeddingProvider(model_name="BAAI/bge-small-en-v1.5")
+            provider_1 = LocalEmbeddingProvider(model_name="BAAI/bge-small-en-v1.5", threads=1)
             m1 = provider_1._get_model()
 
-            provider_2 = LocalEmbeddingProvider(model_name="BAAI/bge-small-en-v1.5")
+            provider_2 = LocalEmbeddingProvider(model_name="BAAI/bge-small-en-v1.5", threads=1)
             m2 = provider_2._get_model()
 
             assert m1 is m2
@@ -174,6 +176,42 @@ def test_local_provider_model_caching_singleton() -> None:
     finally:
         LocalEmbeddingProvider._cached_model = prev_model
         LocalEmbeddingProvider._cached_model_name = prev_name
+        LocalEmbeddingProvider._cached_model_threads = prev_threads
+
+
+def test_local_provider_thread_and_batch_configuration() -> None:
+    """Test LocalEmbeddingProvider parses thread limits and batch size from env/args."""
+    with patch.dict(os.environ, {"EMBEDDING_THREADS": "2", "EMBEDDING_BATCH_SIZE": "8"}, clear=True):
+        provider = LocalEmbeddingProvider(model=MagicMock())
+        assert provider.threads == 2
+        assert provider._default_batch_size == 8
+
+    # Explicit constructor override takes precedence
+    provider_custom = LocalEmbeddingProvider(model=MagicMock(), threads=1, batch_size=16)
+    assert provider_custom.threads == 1
+    assert provider_custom._default_batch_size == 16
+
+
+def test_local_provider_threads_passed_to_fastembed() -> None:
+    """Test that thread configuration is explicitly passed to fastembed.TextEmbedding."""
+    mock_instance = MagicMock()
+    prev_model = LocalEmbeddingProvider._cached_model
+    prev_name = LocalEmbeddingProvider._cached_model_name
+    prev_threads = LocalEmbeddingProvider._cached_model_threads
+    try:
+        with patch("fastembed.TextEmbedding", return_value=mock_instance) as mock_cls:
+            LocalEmbeddingProvider._cached_model = None
+            LocalEmbeddingProvider._cached_model_name = None
+            LocalEmbeddingProvider._cached_model_threads = None
+
+            provider = LocalEmbeddingProvider(threads=1)
+            provider._get_model()
+
+            mock_cls.assert_called_once_with(model_name="BAAI/bge-small-en-v1.5", threads=1)
+    finally:
+        LocalEmbeddingProvider._cached_model = prev_model
+        LocalEmbeddingProvider._cached_model_name = prev_name
+        LocalEmbeddingProvider._cached_model_threads = prev_threads
 
 
 # ==========================================
