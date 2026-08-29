@@ -1,7 +1,17 @@
 "use client";
 
 import { useState } from "react";
-import { X, GitBranch, Folder, Loader2, CheckCircle2, AlertCircle, Sparkles } from "lucide-react";
+import {
+  X,
+  GitBranch,
+  Folder,
+  CheckCircle2,
+  AlertCircle,
+  RefreshCw,
+  Layers,
+  FileCode,
+  Sparkles,
+} from "lucide-react";
 import { indexRepository, AuthError } from "@/lib/api-client";
 import { IndexRepositoryResponse } from "@/lib/types";
 
@@ -24,7 +34,7 @@ export function IndexModal({
   const [githubUrl, setGithubUrl] = useState<string>("");
   const [localPath, setLocalPath] = useState<string>("");
   const [isLoading, setIsLoading] = useState<boolean>(false);
-  const [statusMessage, setStatusMessage] = useState<string>("");
+  const [currentStage, setCurrentStage] = useState<number>(0);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [result, setResult] = useState<IndexRepositoryResponse | null>(null);
 
@@ -39,7 +49,7 @@ export function IndexModal({
 
     if (mode === "github") {
       if (!githubUrl.trim()) {
-        setErrorMsg("Please enter a valid GitHub repository URL.");
+        setErrorMsg("Please enter a valid GitHub repository HTTPS URL.");
         return;
       }
       payload.github_url = githubUrl.trim();
@@ -52,23 +62,28 @@ export function IndexModal({
     }
 
     setIsLoading(true);
-    setStatusMessage("Indexing repository...");
+    setCurrentStage(1);
+
+    // Timers to provide step feedback during backend indexing
+    const timer1 = setTimeout(() => setCurrentStage(2), 1200);
+    const timer2 = setTimeout(() => setCurrentStage(3), 2800);
+    const timer3 = setTimeout(() => setCurrentStage(4), 4500);
 
     try {
-      // Step feedback messages
-      const timer1 = setTimeout(() => setStatusMessage("Parsing AST symbols & files..."), 1500);
-      const timer2 = setTimeout(() => setStatusMessage("Creating 384d FastEmbed embeddings & CodeGraph..."), 3500);
-
       const res = await indexRepository(payload);
-
       clearTimeout(timer1);
       clearTimeout(timer2);
-
+      clearTimeout(timer3);
+      setCurrentStage(5);
       setIsLoading(false);
       setResult(res);
       onSuccess(res);
     } catch (err: any) {
+      clearTimeout(timer1);
+      clearTimeout(timer2);
+      clearTimeout(timer3);
       setIsLoading(false);
+      setCurrentStage(0);
       if (err instanceof AuthError) {
         onAuthRequired(err.message);
         onClose();
@@ -78,163 +93,236 @@ export function IndexModal({
     }
   };
 
+  const handleClose = () => {
+    if (!isLoading) {
+      setErrorMsg(null);
+      setResult(null);
+      setCurrentStage(0);
+      onClose();
+    }
+  };
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm animate-in fade-in duration-200">
-      <div className="w-full max-w-lg bg-zinc-900 border border-zinc-800 rounded-xl shadow-2xl overflow-hidden font-sans">
-        {/* Modal Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-800 bg-zinc-950/50">
-          <div className="flex items-center space-x-2.5">
-            <div className="p-2 rounded-lg bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">
-              <Sparkles className="w-4 h-4" />
-            </div>
-            <div>
-              <h3 className="text-sm font-semibold text-zinc-100 font-mono">Index Codebase Repository</h3>
-              <p className="text-xs text-zinc-400">Load AST structure, symbols, and vector embeddings</p>
-            </div>
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#111111]/80 backdrop-blur-[2px] animate-fade-in-up font-sans">
+      <div className="w-full max-w-[480px] bg-[#1C1C1C] border border-[#2A2A2A] rounded-lg overflow-hidden flex flex-col shadow-[0_4px_12px_rgba(0,0,0,0.5)]">
+        {/* Header */}
+        <div className="p-4 border-b border-[#2A2A2A] flex justify-between items-center bg-[#171717]">
+          <div>
+            <h2 className="text-base font-semibold text-[#e2e2e2]">
+              {isLoading ? "Indexing Repository" : "Index Repository"}
+            </h2>
+            <p className="text-xs text-[#8c909f] mt-0.5">
+              {isLoading
+                ? "Processing AST symbols & semantic embeddings"
+                : "Load and index codebase into DevMind RAG engine"}
+            </p>
           </div>
           <button
-            onClick={onClose}
-            className="p-1 rounded-md text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition-colors"
+            onClick={handleClose}
+            disabled={isLoading}
+            className="text-[#8c909f] hover:text-[#e2e2e2] p-1 rounded transition-colors disabled:opacity-30 cursor-pointer"
           >
-            <X className="w-5 h-5" />
+            <X className="w-4 h-4" />
           </button>
         </div>
 
-        {/* Modal Body */}
-        <div className="p-6 space-y-5">
-          {/* Mode Switcher Tabs */}
-          <div className="grid grid-cols-2 p-1 rounded-lg bg-zinc-950 border border-zinc-800 text-xs font-mono">
-            <button
-              type="button"
-              onClick={() => setMode("github")}
-              className={`flex items-center justify-center space-x-2 py-2 rounded-md transition-all ${
-                mode === "github"
-                  ? "bg-zinc-800 text-indigo-300 font-semibold shadow-sm"
-                  : "text-zinc-400 hover:text-zinc-200"
-              }`}
-            >
-              <GitBranch className="w-3.5 h-3.5" />
-              <span>GitHub Repository</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setMode("local")}
-              className={`flex items-center justify-center space-x-2 py-2 rounded-md transition-all ${
-                mode === "local"
-                  ? "bg-zinc-800 text-indigo-300 font-semibold shadow-sm"
-                  : "text-zinc-400 hover:text-zinc-200"
-              }`}
-            >
-              <Folder className="w-3.5 h-3.5" />
-              <span>Local Path</span>
-            </button>
+        {/* Progress Bar when loading */}
+        {isLoading && (
+          <div className="h-[2px] w-full bg-[#2A2A2A]">
+            <div
+              className="h-full bg-[#3B82F6] transition-all duration-500"
+              style={{
+                width:
+                  currentStage === 1
+                    ? "25%"
+                    : currentStage === 2
+                    ? "50%"
+                    : currentStage === 3
+                    ? "75%"
+                    : currentStage >= 4
+                    ? "95%"
+                    : "10%",
+              }}
+            ></div>
           </div>
+        )}
 
-          <form onSubmit={handleSubmit} className="space-y-4">
-            {mode === "github" ? (
-              <div className="space-y-1.5">
-                <label className="block text-xs font-mono font-medium text-zinc-300">
-                  Public GitHub Repository HTTPS URL
-                </label>
-                <input
-                  type="url"
-                  value={githubUrl}
-                  onChange={(e) => setGithubUrl(e.target.value)}
-                  placeholder="https://github.com/username/repository"
-                  disabled={isLoading}
-                  className="w-full px-3 py-2 rounded-md bg-zinc-950 border border-zinc-800 text-zinc-100 text-sm font-mono placeholder:text-zinc-600 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 disabled:opacity-50 transition-all"
-                />
-                <p className="text-[11px] text-zinc-500 font-mono">
-                  Example: https://github.com/huzefa-lokhandwala/proofos
-                </p>
-              </div>
-            ) : (
-              <div className="space-y-1.5">
-                <label className="block text-xs font-mono font-medium text-zinc-300">
-                  Local Repository Directory Path
-                </label>
-                <input
-                  type="text"
-                  value={localPath}
-                  onChange={(e) => setLocalPath(e.target.value)}
-                  placeholder="repositories/sample_project"
-                  disabled={isLoading}
-                  className="w-full px-3 py-2 rounded-md bg-zinc-950 border border-zinc-800 text-zinc-100 text-sm font-mono placeholder:text-zinc-600 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 disabled:opacity-50 transition-all"
-                />
-                <p className="text-[11px] text-zinc-500 font-mono">
-                  Example: repositories/sample_project
-                </p>
-              </div>
-            )}
-
-            {/* Error Message Alert */}
-            {errorMsg && (
-              <div className="p-3 rounded-lg bg-rose-500/10 border border-rose-500/30 flex items-start space-x-2 text-xs text-rose-300 font-mono">
-                <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
-                <span>{errorMsg}</span>
-              </div>
-            )}
-
-            {/* Loading Feedback State */}
-            {isLoading && (
-              <div className="p-4 rounded-lg bg-zinc-950 border border-zinc-800 flex items-center space-x-3 text-xs font-mono text-indigo-300">
-                <Loader2 className="w-4 h-4 text-indigo-400 animate-spin shrink-0" />
-                <span>{statusMessage}</span>
-              </div>
-            )}
-
-            {/* Success Result Statistics Card */}
-            {result && (
-              <div className="p-4 rounded-lg bg-emerald-500/10 border border-emerald-500/30 space-y-2 font-mono">
-                <div className="flex items-center space-x-2 text-xs text-emerald-400 font-semibold">
-                  <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                  <span>Repository Indexed Successfully</span>
-                </div>
-                <div className="grid grid-cols-3 gap-2 pt-1 text-center text-xs">
-                  <div className="p-2 rounded bg-zinc-900 border border-zinc-800">
-                    <div className="text-zinc-400 text-[10px]">Files</div>
-                    <div className="font-bold text-zinc-100">{result.files_loaded}</div>
-                  </div>
-                  <div className="p-2 rounded bg-zinc-900 border border-zinc-800">
-                    <div className="text-zinc-400 text-[10px]">Chunks</div>
-                    <div className="font-bold text-zinc-100">{result.chunks_created}</div>
-                  </div>
-                  <div className="p-2 rounded bg-zinc-900 border border-zinc-800">
-                    <div className="text-zinc-400 text-[10px]">Embeddings</div>
-                    <div className="font-bold text-zinc-100">{result.embeddings_created}</div>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* Actions */}
-            <div className="flex items-center justify-end space-x-2 pt-2">
-              <button
-                type="button"
-                onClick={onClose}
-                disabled={isLoading}
-                className="px-4 py-2 rounded-md text-zinc-400 hover:text-zinc-200 text-xs font-mono transition-colors disabled:opacity-50"
-              >
-                {result ? "Close" : "Cancel"}
-              </button>
-              {!result && (
+        {/* Body */}
+        <div className="p-5 flex flex-col gap-4">
+          {!isLoading && !result && (
+            <>
+              {/* Segmented Control */}
+              <div className="flex bg-[#121414] border border-[#2A2A2A] rounded p-[2px] w-full text-xs font-medium">
                 <button
-                  type="submit"
-                  disabled={isLoading}
-                  className="flex items-center space-x-2 px-5 py-2 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white font-mono text-xs font-medium transition-colors shadow-sm disabled:opacity-50"
+                  type="button"
+                  onClick={() => setMode("github")}
+                  className={`flex-1 py-1.5 px-3 rounded flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                    mode === "github"
+                      ? "bg-[#282a2b] text-[#e2e2e2] font-semibold border border-[#424754] shadow-sm"
+                      : "text-[#8c909f] hover:text-[#e2e2e2]"
+                  }`}
                 >
-                  {isLoading ? (
-                    <>
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      <span>Indexing...</span>
-                    </>
-                  ) : (
-                    <span>Start Indexing</span>
-                  )}
+                  <GitBranch className="w-3.5 h-3.5" />
+                  <span>GitHub Repository</span>
                 </button>
-              )}
+                <button
+                  type="button"
+                  onClick={() => setMode("local")}
+                  className={`flex-1 py-1.5 px-3 rounded flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                    mode === "local"
+                      ? "bg-[#282a2b] text-[#e2e2e2] font-semibold border border-[#424754] shadow-sm"
+                      : "text-[#8c909f] hover:text-[#e2e2e2]"
+                  }`}
+                >
+                  <Folder className="w-3.5 h-3.5" />
+                  <span>Local Path</span>
+                </button>
+              </div>
+
+              {/* Form Input */}
+              <form onSubmit={handleSubmit} className="flex flex-col gap-3">
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-xs font-medium text-[#e2e2e2]">
+                    {mode === "github" ? "GitHub HTTPS URL" : "Local Repository Folder Path"}
+                  </label>
+                  <input
+                    type={mode === "github" ? "url" : "text"}
+                    value={mode === "github" ? githubUrl : localPath}
+                    onChange={(e) =>
+                      mode === "github" ? setGithubUrl(e.target.value) : setLocalPath(e.target.value)
+                    }
+                    placeholder={
+                      mode === "github"
+                        ? "https://github.com/huzefa-lokhandwala/proofos"
+                        : "repositories/sample_project"
+                    }
+                    className="w-full bg-[#111111] border border-[#2A2A2A] text-[#e2e2e2] text-xs px-3 py-2 rounded focus:outline-none focus:border-[#3B82F6] focus:ring-1 focus:ring-[#3B82F6] placeholder-[#8c909f]/50 transition-colors font-mono"
+                  />
+                  <span className="text-[11px] text-[#8c909f]">
+                    {mode === "github"
+                      ? "Clones shallow depth (--depth 1) securely."
+                      : "Resolves supported source files (.py, .ts, .tsx, .js, .json, etc.)."}
+                  </span>
+                </div>
+
+                {errorMsg && (
+                  <div className="p-3 rounded bg-[#93000a]/20 border border-[#ffb4ab]/30 flex items-start gap-2 text-xs text-[#ffb4ab]">
+                    <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                    <span>{errorMsg}</span>
+                  </div>
+                )}
+
+                {/* Footer Buttons */}
+                <div className="flex items-center justify-end gap-2 pt-2 border-t border-[#2A2A2A] mt-2">
+                  <button
+                    type="button"
+                    onClick={handleClose}
+                    className="px-3 py-1.5 text-xs text-[#8c909f] hover:text-[#e2e2e2] rounded transition-colors cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-4 py-1.5 text-xs font-medium bg-[#3B82F6] hover:bg-[#2563eb] text-[#F5F5F5] rounded transition-colors cursor-pointer"
+                  >
+                    Index Repository
+                  </button>
+                </div>
+              </form>
+            </>
+          )}
+
+          {/* Indexing In Progress Stages UI (matching Stitch) */}
+          {isLoading && (
+            <div className="flex flex-col gap-3 py-1">
+              <ul className="flex flex-col gap-2.5 text-xs">
+                <li className="flex items-center gap-2.5">
+                  {currentStage > 1 ? (
+                    <CheckCircle2 className="w-4 h-4 text-[#10B981] shrink-0" />
+                  ) : (
+                    <RefreshCw className="w-4 h-4 text-[#3B82F6] animate-spin shrink-0" />
+                  )}
+                  <span className={currentStage >= 1 ? "text-[#e2e2e2]" : "text-[#8c909f]"}>
+                    Connecting & loading repository source files...
+                  </span>
+                </li>
+
+                <li className="flex items-center gap-2.5">
+                  {currentStage > 2 ? (
+                    <CheckCircle2 className="w-4 h-4 text-[#10B981] shrink-0" />
+                  ) : currentStage === 2 ? (
+                    <RefreshCw className="w-4 h-4 text-[#3B82F6] animate-spin shrink-0" />
+                  ) : (
+                    <div className="w-4 h-4 rounded-full border border-[#424754] shrink-0"></div>
+                  )}
+                  <span className={currentStage >= 2 ? "text-[#e2e2e2]" : "text-[#8c909f]"}>
+                    Parsing AST functions, classes & dependency graph...
+                  </span>
+                </li>
+
+                <li className="flex items-center gap-2.5">
+                  {currentStage > 3 ? (
+                    <CheckCircle2 className="w-4 h-4 text-[#10B981] shrink-0" />
+                  ) : currentStage === 3 ? (
+                    <RefreshCw className="w-4 h-4 text-[#3B82F6] animate-spin shrink-0" />
+                  ) : (
+                    <div className="w-4 h-4 rounded-full border border-[#424754] shrink-0"></div>
+                  )}
+                  <span className={currentStage >= 3 ? "text-[#e2e2e2]" : "text-[#8c909f]"}>
+                    Generating 384d FastEmbed vector embeddings...
+                  </span>
+                </li>
+
+                <li className="flex items-center gap-2.5">
+                  {currentStage > 4 ? (
+                    <CheckCircle2 className="w-4 h-4 text-[#10B981] shrink-0" />
+                  ) : currentStage === 4 ? (
+                    <RefreshCw className="w-4 h-4 text-[#3B82F6] animate-spin shrink-0" />
+                  ) : (
+                    <div className="w-4 h-4 rounded-full border border-[#424754] shrink-0"></div>
+                  )}
+                  <span className={currentStage >= 4 ? "text-[#e2e2e2]" : "text-[#8c909f]"}>
+                    Building FAISS index & persisting pgvector state...
+                  </span>
+                </li>
+              </ul>
             </div>
-          </form>
+          )}
+
+          {/* Success Statistics Result View */}
+          {result && (
+            <div className="flex flex-col gap-4 animate-fade-in-up">
+              <div className="p-3.5 rounded bg-[#10B981]/10 border border-[#10B981]/30 flex items-center gap-2.5 text-xs text-[#10B981] font-mono">
+                <CheckCircle2 className="w-4 h-4 shrink-0" />
+                <span className="font-semibold">Repository '{result.repository}' successfully indexed!</span>
+              </div>
+
+              <div className="grid grid-cols-3 gap-2 text-center text-xs font-mono">
+                <div className="p-2.5 rounded bg-[#171717] border border-[#2A2A2A]">
+                  <div className="text-[10px] text-[#8c909f] uppercase tracking-wider">Files</div>
+                  <div className="text-base font-bold text-[#e2e2e2] mt-0.5">{result.files_loaded}</div>
+                </div>
+                <div className="p-2.5 rounded bg-[#171717] border border-[#2A2A2A]">
+                  <div className="text-[10px] text-[#8c909f] uppercase tracking-wider">Chunks</div>
+                  <div className="text-base font-bold text-[#e2e2e2] mt-0.5">{result.chunks_created}</div>
+                </div>
+                <div className="p-2.5 rounded bg-[#171717] border border-[#2A2A2A]">
+                  <div className="text-[10px] text-[#8c909f] uppercase tracking-wider">Embeddings</div>
+                  <div className="text-base font-bold text-[#adc6ff] mt-0.5">{result.embeddings_created}</div>
+                </div>
+              </div>
+
+              <div className="flex justify-end pt-2">
+                <button
+                  type="button"
+                  onClick={handleClose}
+                  className="px-4 py-1.5 text-xs font-medium bg-[#3B82F6] hover:bg-[#2563eb] text-[#F5F5F5] rounded transition-colors cursor-pointer"
+                >
+                  Start Querying
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>

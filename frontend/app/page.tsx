@@ -1,188 +1,189 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { Sidebar } from "@/components/Sidebar";
 import { Navbar } from "@/components/Navbar";
+import { InitialState } from "@/components/InitialState";
+import { ConversationView } from "@/components/ConversationView";
+import { EvidencePanel } from "@/components/EvidencePanel";
 import { IndexModal } from "@/components/IndexModal";
 import { SettingsModal } from "@/components/SettingsModal";
-import { QueryInput } from "@/components/QueryInput";
-import { AnswerView } from "@/components/AnswerView";
-import { SourceDrawer } from "@/components/SourceDrawer";
-import { queryCodebase, getStoredApiKey, AuthError } from "@/lib/api-client";
-import { IndexRepositoryResponse, QueryResponse } from "@/lib/types";
-import { Terminal, ShieldAlert, Sparkles, Code2, Layers, Cpu } from "lucide-react";
+import { HistoryDrawer } from "@/components/HistoryDrawer";
+import { queryCodebase, AuthError } from "@/lib/api-client";
+import { QueryResponse, IndexRepositoryResponse } from "@/lib/types";
+
+interface ConversationItem {
+  query: string;
+  response?: QueryResponse;
+  error?: string;
+}
 
 export default function Home() {
-  const [activeRepository, setActiveRepository] = useState<string | null>("proofos");
+  const [activeRepository, setActiveRepository] = useState<string | null>(null);
+  const [conversations, setConversations] = useState<ConversationItem[]>([]);
+  const [queryHistory, setQueryHistory] = useState<string[]>([]);
+  const [isLoadingQuery, setIsLoadingQuery] = useState<boolean>(false);
+  const [selectedEvidenceIndex, setSelectedEvidenceIndex] = useState<number>(0);
+  const [isEvidenceOpen, setIsEvidenceOpen] = useState<boolean>(true);
+
+  // Modals
   const [isIndexModalOpen, setIsIndexModalOpen] = useState<boolean>(false);
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState<boolean>(false);
+  const [isHistoryOpen, setIsHistoryOpen] = useState<boolean>(false);
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState<boolean>(false);
   const [authErrorMessage, setAuthErrorMessage] = useState<string | null>(null);
 
-  const [isLoadingQuery, setIsLoadingQuery] = useState<boolean>(false);
-  const [queryResponse, setQueryResponse] = useState<QueryResponse | null>(null);
-  const [queryError, setQueryError] = useState<string | null>(null);
-  const [queryHistory, setQueryHistory] = useState<string[]>([]);
-
+  // Load last active repository or query history if present in localStorage
   useEffect(() => {
-    // Check if API key is unconfigured on initial load
-    const apiKey = getStoredApiKey();
-    if (!apiKey) {
-      // Prompt user politely via settings if key is empty
+    try {
+      const savedRepo = localStorage.getItem("devmind_active_repo");
+      if (savedRepo) setActiveRepository(savedRepo);
+      const savedHistory = localStorage.getItem("devmind_query_history");
+      if (savedHistory) setQueryHistory(JSON.parse(savedHistory));
+    } catch {
+      // ignore storage errors
     }
   }, []);
 
   const handleIndexSuccess = (res: IndexRepositoryResponse) => {
     setActiveRepository(res.repository);
-    setIsIndexModalOpen(false);
+    try {
+      localStorage.setItem("devmind_active_repo", res.repository);
+    } catch {}
   };
 
-  const handleAuthRequired = (message: string) => {
-    setAuthErrorMessage(message);
-    setIsSettingsModalOpen(true);
-  };
+  const handleSendQuery = async (queryText: string, topK: number) => {
+    if (!queryText.trim() || isLoadingQuery) return;
 
-  const handleQuerySubmit = async (queryStr: string, topK: number) => {
     setIsLoadingQuery(true);
-    setQueryError(null);
-    setAuthErrorMessage(null);
+    const newConversations = [...conversations, { query: queryText }];
+    setConversations(newConversations);
+
+    // Save to query history
+    const updatedHistory = Array.from(new Set([queryText, ...queryHistory])).slice(0, 30);
+    setQueryHistory(updatedHistory);
+    try {
+      localStorage.setItem("devmind_query_history", JSON.stringify(updatedHistory));
+    } catch {}
 
     try {
-      const res = await queryCodebase({ query: queryStr, top_k: topK });
-      setQueryResponse(res);
-      setIsLoadingQuery(false);
+      const response = await queryCodebase({
+        query: queryText,
+        top_k: topK,
+      });
 
-      // Add to query history
-      if (!queryHistory.includes(queryStr)) {
-        setQueryHistory((prev) => [...prev, queryStr]);
-      }
+      setConversations((prev) =>
+        prev.map((item, idx) =>
+          idx === prev.length - 1 ? { ...item, response } : item
+        )
+      );
+
+      // Automatically focus first source and open evidence drawer
+      setSelectedEvidenceIndex(0);
+      setIsEvidenceOpen(true);
     } catch (err: any) {
-      setIsLoadingQuery(false);
       if (err instanceof AuthError) {
-        handleAuthRequired(err.message);
-        return;
+        setAuthErrorMessage(err.message);
+        setIsSettingsModalOpen(true);
       }
-      setQueryError(err.message || "An unexpected error occurred during query processing.");
+      setConversations((prev) =>
+        prev.map((item, idx) =>
+          idx === prev.length - 1
+            ? { ...item, error: err.message || "Failed to retrieve codebase answer." }
+            : item
+        )
+      );
+    } finally {
+      setIsLoadingQuery(false);
     }
   };
 
+  const handleNewChat = () => {
+    setConversations([]);
+    setSelectedEvidenceIndex(0);
+  };
+
+  const handleClearHistory = () => {
+    setQueryHistory([]);
+    try {
+      localStorage.removeItem("devmind_query_history");
+    } catch {}
+  };
+
+  // Get active sources from the latest conversation response
+  const latestResponse = conversations
+    .slice()
+    .reverse()
+    .find((c) => c.response)?.response;
+  const currentSources = latestResponse?.sources || [];
+
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col font-sans selection:bg-indigo-500/30 selection:text-indigo-200">
-      {/* Navbar Header */}
-      <Navbar
+    <div className="flex h-screen w-full overflow-hidden bg-[#111111] text-[#e2e2e2] font-sans antialiased">
+      {/* Left Sidebar */}
+      <Sidebar
         activeRepository={activeRepository}
+        activeView={conversations.length > 0 ? "chat" : "chat"}
+        onNewChat={handleNewChat}
         onOpenIndexModal={() => setIsIndexModalOpen(true)}
         onOpenSettingsModal={() => setIsSettingsModalOpen(true)}
+        onToggleHistory={() => setIsHistoryOpen(true)}
       />
 
-      {/* Main Workspace Area */}
-      <main className="flex-1 max-w-5xl w-full mx-auto px-4 py-8 space-y-6">
-        {/* Error Banner */}
-        {queryError && (
-          <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 flex items-start space-x-3 text-xs font-mono text-rose-300 animate-in fade-in duration-150">
-            <ShieldAlert className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
-            <div className="space-y-1">
-              <p className="font-semibold text-rose-200">Query Processing Error</p>
-              <p>{queryError}</p>
-            </div>
-          </div>
-        )}
+      {/* Main Workspace Column */}
+      <div className="flex-1 flex flex-col min-w-0 h-full relative overflow-hidden">
+        {/* Top Navbar */}
+        <Navbar
+          activeRepository={activeRepository}
+          onOpenIndexModal={() => setIsIndexModalOpen(true)}
+          onOpenSettingsModal={() => setIsSettingsModalOpen(true)}
+          onToggleMobileMenu={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
+        />
 
-        {/* Natural Language Query Input Section */}
-        <section className="space-y-2">
-          <div className="flex items-center justify-between px-1">
-            <h2 className="text-xs font-mono font-semibold uppercase tracking-wider text-zinc-400 flex items-center space-x-2">
-              <Terminal className="w-3.5 h-3.5 text-indigo-400" />
-              <span>Codebase Query Prompt</span>
-            </h2>
-          </div>
-          <QueryInput
-            onSubmit={handleQuerySubmit}
-            isLoading={isLoadingQuery}
-            history={queryHistory}
-            onSelectHistory={(q) => handleQuerySubmit(q, 5)}
-          />
-        </section>
+        {/* Workspace Canvas */}
+        <div className="flex-1 flex flex-col lg:flex-row overflow-hidden w-full relative">
+          {conversations.length === 0 ? (
+            <InitialState
+              activeRepository={activeRepository}
+              onSubmit={handleSendQuery}
+              isLoading={isLoadingQuery}
+            />
+          ) : (
+            <>
+              {/* Central Conversation Canvas */}
+              <ConversationView
+                conversations={conversations}
+                isLoading={isLoadingQuery}
+                onSendQuery={handleSendQuery}
+                onSelectEvidence={(idx) => {
+                  setSelectedEvidenceIndex(idx);
+                  setIsEvidenceOpen(true);
+                }}
+                selectedEvidenceIndex={selectedEvidenceIndex}
+              />
 
-        {/* Answer View & Sources Section */}
-        {queryResponse ? (
-          <section className="space-y-6 animate-in fade-in duration-300">
-            <AnswerView response={queryResponse} />
-            <SourceDrawer sources={queryResponse.sources} />
-          </section>
-        ) : !isLoadingQuery && !queryError ? (
-          /* Welcome Empty State */
-          <div className="p-8 rounded-2xl border border-zinc-900 bg-zinc-900/30 text-center space-y-6 my-8">
-            <div className="inline-flex p-3 rounded-2xl bg-indigo-950/50 border border-indigo-500/20 text-indigo-400">
-              <Sparkles className="w-8 h-8" />
-            </div>
+              {/* Right Side Evidence Panel */}
+              {isEvidenceOpen && currentSources.length > 0 && (
+                <EvidencePanel
+                  sources={currentSources}
+                  selectedSourceIndex={selectedEvidenceIndex}
+                  onSelectSource={(idx) => setSelectedEvidenceIndex(idx)}
+                  onClose={() => setIsEvidenceOpen(false)}
+                />
+              )}
+            </>
+          )}
+        </div>
+      </div>
 
-            <div className="max-w-md mx-auto space-y-2">
-              <h3 className="text-base font-bold text-zinc-100 font-mono">
-                Ask DevMind AI About Your Codebase
-              </h3>
-              <p className="text-xs text-zinc-400 leading-relaxed">
-                DevMind AI uses AST-aware code chunking, Gemini embeddings, hybrid FAISS search, AST CodeGraph call expansion, and Gemini 3.6 Flash for deep codebase reasoning.
-              </p>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 max-w-2xl mx-auto pt-2 text-left font-mono text-xs">
-              <button
-                onClick={() =>
-                  handleQuerySubmit("Where is VerificationEngine implemented?", 5)
-                }
-                className="p-3 rounded-xl border border-zinc-800/80 bg-zinc-900/80 hover:border-indigo-500/40 hover:bg-zinc-900 transition-all text-zinc-300 group"
-              >
-                <div className="flex items-center space-x-2 text-indigo-400 group-hover:text-indigo-300 font-semibold mb-1">
-                  <Code2 className="w-3.5 h-3.5" />
-                  <span>Class Definition</span>
-                </div>
-                <p className="text-[11px] text-zinc-500 line-clamp-2">
-                  "Where is VerificationEngine implemented?"
-                </p>
-              </button>
-
-              <button
-                onClick={() =>
-                  handleQuerySubmit("Where is Builder Score calculated?", 5)
-                }
-                className="p-3 rounded-xl border border-zinc-800/80 bg-zinc-900/80 hover:border-indigo-500/40 hover:bg-zinc-900 transition-all text-zinc-300 group"
-              >
-                <div className="flex items-center space-x-2 text-indigo-400 group-hover:text-indigo-300 font-semibold mb-1">
-                  <Cpu className="w-3.5 h-3.5" />
-                  <span>Scoring Engine</span>
-                </div>
-                <p className="text-[11px] text-zinc-500 line-clamp-2">
-                  "Where is Builder Score calculated?"
-                </p>
-              </button>
-
-              <button
-                onClick={() =>
-                  handleQuerySubmit(
-                    "Which API route handles verification submissions?",
-                    5
-                  )
-                }
-                className="p-3 rounded-xl border border-zinc-800/80 bg-zinc-900/80 hover:border-indigo-500/40 hover:bg-zinc-900 transition-all text-zinc-300 group"
-              >
-                <div className="flex items-center space-x-2 text-indigo-400 group-hover:text-indigo-300 font-semibold mb-1">
-                  <Layers className="w-3.5 h-3.5" />
-                  <span>API Route Handler</span>
-                </div>
-                <p className="text-[11px] text-zinc-500 line-clamp-2">
-                  "Which API route handles verification?"
-                </p>
-              </button>
-            </div>
-          </div>
-        ) : null}
-      </main>
-
-      {/* Index Modal */}
+      {/* Index Repository Modal */}
       <IndexModal
         isOpen={isIndexModalOpen}
         onClose={() => setIsIndexModalOpen(false)}
         onSuccess={handleIndexSuccess}
-        onAuthRequired={handleAuthRequired}
+        onAuthRequired={(msg) => {
+          setAuthErrorMessage(msg);
+          setIsSettingsModalOpen(true);
+        }}
       />
 
       {/* Settings / API Key Modal */}
@@ -197,6 +198,15 @@ export default function Home() {
           setAuthErrorMessage(null);
         }}
         authErrorMessage={authErrorMessage}
+      />
+
+      {/* Query History Drawer */}
+      <HistoryDrawer
+        isOpen={isHistoryOpen}
+        onClose={() => setIsHistoryOpen(false)}
+        history={queryHistory}
+        onSelectQuery={(q) => handleSendQuery(q, 5)}
+        onClearHistory={handleClearHistory}
       />
     </div>
   );
