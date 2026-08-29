@@ -45,6 +45,18 @@ class RepositoryLoader:
         }
     )
 
+    IGNORE_FILES: frozenset[str] = frozenset(
+        {
+            "package-lock.json",
+            "pnpm-lock.yaml",
+            "yarn.lock",
+            "poetry.lock",
+            "Cargo.lock",
+            "composer.lock",
+            "Gemfile.lock",
+        }
+    )
+
     def __init__(self, repository_path: str | Path) -> None:
         """Initialize the loader for a repository root directory.
 
@@ -105,5 +117,7 @@ class RepositoryLoader:
         return documents
 
     def _should_ignore(self, path: Path) -> bool:
-        """Return True when a file lives inside an ignored directory."""
+        """Return True when a file lives inside an ignored directory or is an ignored lockfile."""
+        if path.name in self.IGNORE_FILES:
+            return True
         return any(part in self.IGNORE_FOLDERS for part in path.parts)

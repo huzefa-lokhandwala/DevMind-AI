@@ -182,19 +182,29 @@ class LocalEmbeddingProvider(BaseEmbeddingProvider):
             logger.info("No documents to embed")
             return []
 
+        import resource
+        import sys
+
+        def _get_rss() -> float:
+            rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            return rss / (1024 * 1024) if sys.platform == "darwin" else rss / 1024
+
         actual_batch_size = batch_size or self._default_batch_size
         texts = [doc.content for doc in documents]
         logger.info(
-            "Generating local FastEmbed embeddings for %d document(s) (batch_size=%d, threads=%d)",
+            "Generating local FastEmbed embeddings for %d document(s) (batch_size=%d, threads=%d, initial_rss=%.2f MB)",
             len(documents),
             actual_batch_size,
             self._threads,
+            _get_rss(),
         )
 
         model = self._get_model()
+        logger.info("[TELEMETRY] FastEmbed model ready (RSS=%.2f MB)", _get_rss())
+
         # Stream generator directly into Document instances to minimize intermediate list allocations
         embedded_documents: list[Document] = []
-        for doc, raw_vector in zip(documents, model.embed(texts, batch_size=actual_batch_size)):
+        for i, (doc, raw_vector) in enumerate(zip(documents, model.embed(texts, batch_size=actual_batch_size)), start=1):
             vector: list[float] = [float(val) for val in raw_vector]
             if len(vector) != self._embedding_dimension:
                 raise ValueError(
@@ -203,15 +213,25 @@ class LocalEmbeddingProvider(BaseEmbeddingProvider):
                 )
             embedded_documents.append(replace(doc, embedding=vector))
 
+            # Log memory telemetry every 16 documents
+            if i % 16 == 0 or i == len(documents):
+                logger.info(
+                    "[TELEMETRY] Embedded %d/%d chunk(s) (Batch RSS=%.2f MB)",
+                    i,
+                    len(documents),
+                    _get_rss(),
+                )
+
         if len(embedded_documents) != len(documents):
             raise RuntimeError(
                 f"Embedding count mismatch: expected {len(documents)}, got {len(embedded_documents)}"
             )
 
         logger.info(
-            "Generated %d local embedding(s) with dimension %d",
+            "Generated %d local embedding(s) with dimension %d (Final RSS=%.2f MB)",
             len(embedded_documents),
             self._embedding_dimension,
+            _get_rss(),
         )
         return embedded_documents
 

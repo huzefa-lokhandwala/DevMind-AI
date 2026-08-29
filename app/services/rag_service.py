@@ -157,11 +157,20 @@ class RAGService:
         Raises:
             InvalidRepositoryError: If path is missing, not a directory, or empty.
         """
+        import resource
+        import sys
+
+        def _get_rss() -> float:
+            rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            return rss / (1024 * 1024) if sys.platform == "darwin" else rss / 1024
+
         path = Path(repository_path).resolve()
         if not path.exists():
             raise InvalidRepositoryError(f"Repository path does not exist: {repository_path}")
         if not path.is_dir():
             raise InvalidRepositoryError(f"Repository path is not a directory: {repository_path}")
+
+        logger.info("[TELEMETRY] Start indexing '%s' (RSS=%.2f MB)", path.name, _get_rss())
 
         try:
             loader = RepositoryLoader(path)
@@ -172,15 +181,22 @@ class RAGService:
         if not documents:
             raise InvalidRepositoryError(f"No supported indexable source files found in {repository_path}")
 
+        logger.info("[TELEMETRY] Loaded %d file(s) (RSS=%.2f MB)", len(documents), _get_rss())
+
         chunks = self.chunker.chunk_documents(documents)
+        logger.info("[TELEMETRY] AST chunking produced %d chunk(s) (RSS=%.2f MB)", len(chunks), _get_rss())
+
         embedded_chunks = self.embedding_engine.embed_documents(chunks)
+        logger.info("[TELEMETRY] Embeddings generated for %d chunk(s) (RSS=%.2f MB)", len(embedded_chunks), _get_rss())
 
         vector_store = FAISSVectorStore()
         vector_store.build_index(embedded_chunks)
+        logger.info("[TELEMETRY] FAISS index built (RSS=%.2f MB)", _get_rss())
 
         from app.graph.code_graph import CodeGraph
         code_graph = CodeGraph()
         code_graph.build_from_documents(chunks)
+        logger.info("[TELEMETRY] CodeGraph built (RSS=%.2f MB)", _get_rss())
 
         retriever = Retriever(self.embedding_engine, vector_store, code_graph=code_graph)
 
@@ -197,13 +213,15 @@ class RAGService:
             source_type=source_type,
             embedded_chunks=embedded_chunks,
         )
+        logger.info("[TELEMETRY] Database persistence complete (RSS=%.2f MB)", _get_rss())
 
         logger.info(
-            "Indexed repository '%s': %d files, %d chunks, %d embeddings",
+            "Indexed repository '%s': %d files, %d chunks, %d embeddings (Final RSS=%.2f MB)",
             loader.repository_name,
             len(documents),
             len(chunks),
             len(embedded_chunks),
+            _get_rss(),
         )
 
         return {
