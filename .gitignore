@@ -31,3 +31,6 @@ build/
 data/
 *.db
 *.sqlite3
+
+# Design & Workspace Exports
+stitch_devmind_ai_workspace_redesign/
