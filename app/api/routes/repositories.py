@@ -9,7 +9,12 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from app.api.auth import verify_api_key
 from app.api.schemas.repository import IndexRepositoryRequest, IndexRepositoryResponse
 from app.loaders import GitHubLoaderError
-from app.services.rag_service import InvalidRepositoryError, RAGService
+from app.services.rag_service import (
+    IndexingInProgressError,
+    IndexingMemoryExceededError,
+    InvalidRepositoryError,
+    RAGService,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,12 +56,26 @@ def index_repository(
                 detail="Either 'repository_path' or 'github_url' must be supplied.",
             )
         return IndexRepositoryResponse(**result)
+    except IndexingInProgressError as exc:
+        logger.warning("Repository indexing rejected (409 Conflict): %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    except IndexingMemoryExceededError as exc:
+        logger.error("Repository indexing aborted due to memory circuit breaker (507 Insufficient Storage): %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_507_INSUFFICIENT_STORAGE,
+            detail=str(exc),
+        ) from exc
     except (InvalidRepositoryError, GitHubLoaderError) as exc:
         logger.warning("Repository indexing failed (400 Bad Request): %s", exc)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.exception("Unexpected error indexing repository: %s", exc)
         raise HTTPException(

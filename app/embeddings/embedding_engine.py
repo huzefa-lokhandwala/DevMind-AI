@@ -56,8 +56,9 @@ class LocalEmbeddingProvider(BaseEmbeddingProvider):
 
     DEFAULT_MODEL_NAME = "BAAI/bge-small-en-v1.5"
     DEFAULT_EMBEDDING_DIMENSION = 384
-    DEFAULT_BATCH_SIZE = 16
+    DEFAULT_BATCH_SIZE = 1
     DEFAULT_THREADS = 1
+    MAX_EMBED_CHARS = 2048  # Bound tokenizer input to prevent ONNX tensor memory spikes
 
     _cached_model: Any = None
     _cached_model_name: str | None = None
@@ -79,7 +80,7 @@ class LocalEmbeddingProvider(BaseEmbeddingProvider):
             dimension: Expected vector dimensionality (default: 384).
             model: Optional pre-instantiated or mocked FastEmbed TextEmbedding model.
             threads: Number of execution threads for ONNX Runtime SessionOptions (default: 1).
-            batch_size: Default embedding batch size (default: 16).
+            batch_size: Default embedding batch size (default: 1).
         """
         self._model_name = (
             model_name
@@ -101,7 +102,7 @@ class LocalEmbeddingProvider(BaseEmbeddingProvider):
                 pass
         self._threads = threads if (threads is not None and threads > 0) else parsed_threads
 
-        # Parse default batch size
+        # Parse default batch size (strictly 1 for 512MB RAM ceiling)
         env_batch = os.getenv("EMBEDDING_BATCH_SIZE")
         parsed_batch = self.DEFAULT_BATCH_SIZE
         if env_batch:
@@ -173,7 +174,7 @@ class LocalEmbeddingProvider(BaseEmbeddingProvider):
 
         Args:
             documents: Sequence of Document chunks to embed.
-            batch_size: Optional batch size for embedding iteration (default: 16).
+            batch_size: Optional batch size for embedding iteration (default: 1).
 
         Returns:
             List of new Document instances containing 384-dimensional float embeddings.
@@ -182,6 +183,7 @@ class LocalEmbeddingProvider(BaseEmbeddingProvider):
             logger.info("No documents to embed")
             return []
 
+        import gc
         import resource
         import sys
 
@@ -190,7 +192,6 @@ class LocalEmbeddingProvider(BaseEmbeddingProvider):
             return rss / (1024 * 1024) if sys.platform == "darwin" else rss / 1024
 
         actual_batch_size = batch_size or self._default_batch_size
-        texts = [doc.content for doc in documents]
         logger.info(
             "Generating local FastEmbed embeddings for %d document(s) (batch_size=%d, threads=%d, initial_rss=%.2f MB)",
             len(documents),
@@ -202,9 +203,12 @@ class LocalEmbeddingProvider(BaseEmbeddingProvider):
         model = self._get_model()
         logger.info("[TELEMETRY] FastEmbed model ready (RSS=%.2f MB)", _get_rss())
 
-        # Stream generator directly into Document instances to minimize intermediate list allocations
+        # Feed bounded text generator to model.embed to avoid huge string allocations
+        # Bounded to MAX_EMBED_CHARS (~512 token budget) while Document.content retains full source code
+        bounded_texts = (doc.content[: self.MAX_EMBED_CHARS] for doc in documents)
+
         embedded_documents: list[Document] = []
-        for i, (doc, raw_vector) in enumerate(zip(documents, model.embed(texts, batch_size=actual_batch_size)), start=1):
+        for i, (doc, raw_vector) in enumerate(zip(documents, model.embed(bounded_texts, batch_size=actual_batch_size)), start=1):
             vector: list[float] = [float(val) for val in raw_vector]
             if len(vector) != self._embedding_dimension:
                 raise ValueError(
@@ -213,8 +217,9 @@ class LocalEmbeddingProvider(BaseEmbeddingProvider):
                 )
             embedded_documents.append(replace(doc, embedding=vector))
 
-            # Log memory telemetry every 16 documents
+            # Periodic garbage collection and telemetry every 16 documents
             if i % 16 == 0 or i == len(documents):
+                gc.collect()
                 logger.info(
                     "[TELEMETRY] Embedded %d/%d chunk(s) (Batch RSS=%.2f MB)",
                     i,
@@ -227,6 +232,7 @@ class LocalEmbeddingProvider(BaseEmbeddingProvider):
                 f"Embedding count mismatch: expected {len(documents)}, got {len(embedded_documents)}"
             )
 
+        gc.collect()
         logger.info(
             "Generated %d local embedding(s) with dimension %d (Final RSS=%.2f MB)",
             len(embedded_documents),

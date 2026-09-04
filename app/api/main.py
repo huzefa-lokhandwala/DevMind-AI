@@ -21,10 +21,19 @@ logger = logging.getLogger("devmind_api")
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Manage application lifecycle and initialize single instance of RAGService."""
+    import resource
+    import sys
+
+    def _get_rss() -> float:
+        rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        return rss / (1024 * 1024) if sys.platform == "darwin" else rss / 1024
+
+    logger.info("[TELEMETRY stage 1] Process startup (RSS=%.2f MB)", _get_rss())
     logger.info("Initializing RAGService application state...")
     app.state.rag_service = RAGService()
+    logger.info("[TELEMETRY stage 2] Application startup complete (RSS=%.2f MB)", _get_rss())
     yield
-    logger.info("Shutting down DevMind AI API application...")
+    logger.info("Shutting down DevMind AI API application (Final RSS=%.2f MB)...", _get_rss())
 
 
 app = FastAPI(

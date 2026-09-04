@@ -22,6 +22,8 @@ DEFAULT_DATABASE_URL = (
 )
 
 DATABASE_URL = os.getenv("DATABASE_URL", DEFAULT_DATABASE_URL)
+if DATABASE_URL.startswith("postgresql://"):
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg://", 1)
 
 
 class Base(DeclarativeBase):

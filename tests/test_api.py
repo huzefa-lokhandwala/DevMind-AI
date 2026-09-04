@@ -1,7 +1,4 @@
-"""Unit and integration tests for FastAPI backend endpoints."""
-
-from __future__ import annotations
-
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -13,50 +10,53 @@ from app.embeddings.embedding_engine import EmbeddingEngine
 from app.llm.gemini_provider import GeminiProvider
 from google.genai import types
 
+TEST_API_KEY = "test_devmind_key_abc123"
+
 
 @pytest.fixture
 def client() -> TestClient:
-    """Create a TestClient with mocked GeminiProvider and EmbeddingEngine and clean RAG state."""
-    with TestClient(app) as test_client:
-        mock_client = MagicMock()
-        mock_response = MagicMock()
-        mock_response.text = (
-            "The `login()` function is implemented in `auth.py` (lines 6-13). "
-            "It handles user JWT authentication."
-        )
-        mock_response.usage_metadata.prompt_token_count = 120
-        mock_response.usage_metadata.candidates_token_count = 25
-        mock_response.usage_metadata.total_token_count = 145
-        mock_response.candidates = [MagicMock(finish_reason="STOP")]
-        mock_client.models.generate_content.return_value = mock_response
+    """Create a TestClient with mocked GeminiProvider, EmbeddingEngine, auth headers, and clean RAG state."""
+    with patch.dict(os.environ, {"DEVMIND_API_KEY": TEST_API_KEY, "DEVMIND_ENV": "development"}):
+        with TestClient(app, headers={"X-API-Key": TEST_API_KEY}) as test_client:
+            mock_client = MagicMock()
+            mock_response = MagicMock()
+            mock_response.text = (
+                "The `login()` function is implemented in `auth.py` (lines 6-13). "
+                "It handles user JWT authentication."
+            )
+            mock_response.usage_metadata.prompt_token_count = 120
+            mock_response.usage_metadata.candidates_token_count = 25
+            mock_response.usage_metadata.total_token_count = 145
+            mock_response.candidates = [MagicMock(finish_reason="STOP")]
+            mock_client.models.generate_content.return_value = mock_response
 
-        def embed_side_effect(model: str, contents: str | list[str], config: types.EmbedContentConfig | None = None) -> types.EmbedContentResponse:
-            dim = config.output_dimensionality if config and config.output_dimensionality else 768
-            if isinstance(contents, str):
-                embeddings = [types.ContentEmbedding(values=[0.1] * dim)]
-            else:
-                embeddings = [
-                    types.ContentEmbedding(values=[0.1 * (i + 1)] * dim)
-                    for i in range(len(contents))
-                ]
-            return types.EmbedContentResponse(embeddings=embeddings)
+            def embed_side_effect(model: str, contents: str | list[str], config: types.EmbedContentConfig | None = None) -> types.EmbedContentResponse:
+                dim = config.output_dimensionality if config and config.output_dimensionality else 768
+                if isinstance(contents, str):
+                    embeddings = [types.ContentEmbedding(values=[0.1] * dim)]
+                else:
+                    embeddings = [
+                        types.ContentEmbedding(values=[0.1 * (i + 1)] * dim)
+                        for i in range(len(contents))
+                    ]
+                return types.EmbedContentResponse(embeddings=embeddings)
 
-        mock_client.models.embed_content.side_effect = embed_side_effect
+            mock_client.models.embed_content.side_effect = embed_side_effect
 
-        # Reset runtime state between tests for test isolation
-        service = test_client.app.state.rag_service
-        service.vector_store = None
-        service.retriever = None
-        service.indexed_repository_name = None
-        service.embedding_engine = EmbeddingEngine(client=mock_client)
-        service.llm_provider = GeminiProvider(client=mock_client)
+            # Reset runtime state between tests for test isolation
+            service = test_client.app.state.rag_service
+            service.vector_store = None
+            service.retriever = None
+            service.indexed_repository_name = None
+            service.embedding_engine = EmbeddingEngine(client=mock_client)
+            service.llm_provider = GeminiProvider(client=mock_client)
 
-        yield test_client
+            yield test_client
 
-        # Clean up after test
-        service.vector_store = None
-        service.retriever = None
-        service.indexed_repository_name = None
+            # Clean up after test
+            service.vector_store = None
+            service.retriever = None
+            service.indexed_repository_name = None
 
 
 def test_health_endpoint(client: TestClient) -> None:
@@ -253,3 +253,41 @@ def test_gemini_failure(client: TestClient) -> None:
     )
     assert response.status_code == 502
     assert "LLM generation or search processing failed" in response.json()["detail"]
+
+
+def test_index_repository_concurrent_lock_returns_409(client: TestClient) -> None:
+    """Test POST /repositories/index returns 409 Conflict when another indexing operation is active."""
+    service = client.app.state.rag_service
+    # Simulate an active indexing lock
+    acquired = service._indexing_lock.acquire(blocking=False)
+    assert acquired is True
+    try:
+        response = client.post(
+            "/repositories/index",
+            json={"repository_path": "repositories/sample_project"},
+        )
+        assert response.status_code == 409
+        assert "already in progress" in response.json()["detail"]
+    finally:
+        service._indexing_lock.release()
+
+
+def test_index_repository_skips_oversized_file(tmp_path: Path, client: TestClient) -> None:
+    """Test repository loader skips files exceeding MAX_FILE_SIZE_BYTES limit."""
+    repo_dir = tmp_path / "oversized_repo"
+    repo_dir.mkdir()
+
+    small_file = repo_dir / "valid.py"
+    small_file.write_text("def hello(): return 'world'\n", encoding="utf-8")
+
+    large_file = repo_dir / "giant.py"
+    large_file.write_text("x = 1\n" * 100000, encoding="utf-8")  # ~600 KB
+
+    with patch.dict(os.environ, {"MAX_FILE_SIZE_BYTES": "50000"}):  # 50 KB limit
+        response = client.post(
+            "/repositories/index",
+            json={"repository_path": str(repo_dir)},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["files_loaded"] == 1  # Only small_file loaded

@@ -24,4 +24,4 @@ def get_cors_origins() -> list[str]:
     raw = os.getenv("CORS_ORIGINS", "http://localhost:3000")
     if not raw or not raw.strip():
         return ["http://localhost:3000"]
-    return [origin.strip() for origin in raw.split(",") if origin.strip()]
+    return [origin.strip().rstrip("/") for origin in raw.split(",") if origin.strip()]

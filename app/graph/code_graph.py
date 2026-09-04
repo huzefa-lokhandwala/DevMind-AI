@@ -67,13 +67,16 @@ class CodeGraph:
             self._adjacency.setdefault(source_path, set()).add(target_path)
             self._adjacency.setdefault(target_path, set()).add(source_path)
 
-    def build_from_documents(self, documents: list[Document]) -> None:
+    def build_from_documents(self, documents: Sequence[Document]) -> None:
         """Populate nodes and edges from parsed document metadata."""
         self.nodes.clear()
         self.edges.clear()
         self._symbol_to_file.clear()
         self._adjacency.clear()
+        self.add_documents(documents)
 
+    def add_documents(self, documents: Sequence[Document]) -> None:
+        """Incrementally populate nodes and edges from a batch of parsed Document chunks."""
         # Step 1: Register all File and Symbol Nodes
         for doc in documents:
             file_id = doc.file_path
@@ -138,7 +141,7 @@ class CodeGraph:
                             )
 
         logger.info(
-            "Built CodeGraph with %d nodes and %d edges across %d files",
+            "CodeGraph updated (total_nodes=%d, total_edges=%d, tracked_files=%d)",
             len(self.nodes),
             len(self.edges),
             len(self._adjacency),

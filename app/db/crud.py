@@ -77,52 +77,57 @@ def save_repository_documents(
     files_saved = 0
     chunks_saved = 0
 
-    for path, docs in file_map.items():
-        # Calculate combined content hash for change tracking
-        combined_content = "".join(d.content for d in docs)
-        content_hash = hashlib.sha256(combined_content.encode("utf-8")).hexdigest()
-        language = docs[0].language if docs else None
+    try:
+        for path, docs in file_map.items():
+            # Calculate combined content hash for change tracking
+            combined_content = "".join(d.content for d in docs)
+            content_hash = hashlib.sha256(combined_content.encode("utf-8")).hexdigest()
+            language = docs[0].language if docs else None
 
-        # Check existing file or create
-        stmt = select(FileModel).where(
-            FileModel.repository_id == repository_id,
-            FileModel.path == path,
-        )
-        file_record = db.execute(stmt).scalar_one_or_none()
-
-        if file_record:
-            file_record.language = language
-            file_record.content_hash = content_hash
-            # Delete old chunks for updated file
-            db.query(ChunkModel).filter(ChunkModel.file_id == file_record.id).delete()
-        else:
-            file_record = FileModel(
-                repository_id=repository_id,
-                path=path,
-                language=language,
-                content_hash=content_hash,
+            # Check existing file or create
+            stmt = select(FileModel).where(
+                FileModel.repository_id == repository_id,
+                FileModel.path == path,
             )
-            db.add(file_record)
-            db.flush()  # populate file_record.id
+            file_record = db.execute(stmt).scalar_one_or_none()
 
-        files_saved += 1
+            if file_record:
+                file_record.language = language
+                file_record.content_hash = content_hash
+                # Delete old chunks for updated file
+                db.query(ChunkModel).filter(ChunkModel.file_id == file_record.id).delete()
+            else:
+                file_record = FileModel(
+                    repository_id=repository_id,
+                    path=path,
+                    language=language,
+                    content_hash=content_hash,
+                )
+                db.add(file_record)
+                db.flush()  # populate file_record.id
 
-        # Create chunks
-        for doc in docs:
-            chunk = ChunkModel(
-                file_id=file_record.id,
-                content=doc.content,
-                chunk_type=doc.chunk_type,
-                function_name=doc.function_name,
-                class_name=doc.class_name,
-                start_line=doc.start_line,
-                end_line=doc.end_line,
-                embedding=doc.embedding if doc.embedding else None,
-            )
-            db.add(chunk)
-            chunks_saved += 1
+            files_saved += 1
 
-    db.commit()
+            # Create chunks
+            for doc in docs:
+                chunk = ChunkModel(
+                    file_id=file_record.id,
+                    content=doc.content,
+                    chunk_type=doc.chunk_type,
+                    function_name=doc.function_name,
+                    class_name=doc.class_name,
+                    start_line=doc.start_line,
+                    end_line=doc.end_line,
+                    embedding=doc.embedding if doc.embedding else None,
+                )
+                db.add(chunk)
+                chunks_saved += 1
+
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
     logger.info(
         "Persisted DB records for repo %d: %d files, %d chunks",
         repository_id,

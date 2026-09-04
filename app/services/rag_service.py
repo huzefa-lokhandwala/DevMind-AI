@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,58 @@ class InvalidRepositoryError(Exception):
     """Raised when repository path does not exist, is invalid, or contains no indexable files."""
 
 
+class IndexingInProgressError(Exception):
+    """Raised when an indexing request arrives while another indexing job is in progress."""
+
+
+class IndexingMemoryExceededError(Exception):
+    """Raised when repository indexing memory consumption exceeds configured safety circuit breaker."""
+
+
+def get_process_rss_mb() -> float:
+    """Return instantaneous Resident Set Size (RSS) of the current process in Megabytes (MB)."""
+    # 1. Linux (/proc/self/status VmRSS) - fast and precise instantaneous RSS
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    parts = line.split()
+                    return float(parts[1]) / 1024.0
+    except (FileNotFoundError, PermissionError, ValueError, IndexError):
+        pass
+
+    # 2. macOS (mach_task_basic_info resident_size) - instantaneous RSS
+    import sys
+    if sys.platform == "darwin":
+        try:
+            import ctypes
+            import ctypes.util
+            libc = ctypes.CDLL(ctypes.util.find_library("c"))
+            class _MachTaskBasicInfo(ctypes.Structure):
+                _fields_ = [
+                    ("virtual_size", ctypes.c_uint64),
+                    ("resident_size", ctypes.c_uint64),
+                    ("resident_size_max", ctypes.c_uint64),
+                    ("user_time", ctypes.c_int64 * 2),
+                    ("system_time", ctypes.c_int64 * 2),
+                    ("policy", ctypes.c_int32),
+                    ("suspend_count", ctypes.c_int32),
+                ]
+            count = ctypes.c_uint32(ctypes.sizeof(_MachTaskBasicInfo) // 4)
+            info = _MachTaskBasicInfo()
+            task = libc.mach_task_self()
+            ret = libc.task_info(task, 20, ctypes.byref(info), ctypes.byref(count))
+            if ret == 0:
+                return float(info.resident_size) / (1024.0 * 1024.0)
+        except Exception:
+            pass
+
+    # 3. Fallback to resource getrusage
+    import resource
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return (float(rss) / (1024.0 * 1024.0)) if sys.platform == "darwin" else (float(rss) / 1024.0)
+
+
 class RAGService:
     """Stateful runtime service managing the RAG pipeline lifecycle.
 
@@ -43,19 +96,53 @@ class RAGService:
     Maintains active FAISS vector store state for semantic code queries and persists database metadata.
     """
 
+    DEFAULT_PROCESS_BATCH_SIZE: int = 5
+    DEFAULT_MEMORY_LIMIT_MB: float = 600.0 if sys.platform == "darwin" else 400.0
+
     def __init__(
         self,
         embedding_engine: EmbeddingEngine | None = None,
         llm_provider: GeminiProvider | None = None,
         db_session: Session | None = None,
+        process_batch_size: int | None = None,
+        memory_limit_mb: float | None = None,
     ) -> None:
         """Initialize RAGService components once at application startup."""
+        import os
+        import threading
         logger.info("Initializing RAGService lifecycle...")
         self.embedding_engine = embedding_engine or EmbeddingEngine()
         self.llm_provider = llm_provider or GeminiProvider()
         self.context_assembler = ContextAssembler()
         self.chunker = CodeChunker()
         self.db_session = db_session
+
+        # Bounded repository processing batch size
+        env_batch = os.getenv("REPOSITORY_PROCESS_BATCH_SIZE")
+        parsed_batch = self.DEFAULT_PROCESS_BATCH_SIZE
+        if env_batch:
+            try:
+                b = int(env_batch.strip())
+                if b > 0:
+                    parsed_batch = b
+            except (ValueError, TypeError):
+                pass
+        self.process_batch_size = process_batch_size or parsed_batch
+
+        # Memory circuit breaker limit (default 400 MB for 512 MB Render instance)
+        env_limit = os.getenv("INDEX_MEMORY_LIMIT_MB")
+        parsed_limit = self.DEFAULT_MEMORY_LIMIT_MB
+        if env_limit:
+            try:
+                lim = float(env_limit.strip())
+                if lim > 0:
+                    parsed_limit = lim
+            except (ValueError, TypeError):
+                pass
+        self.memory_limit_mb = memory_limit_mb or parsed_limit
+
+        # Concurrency safety lock
+        self._indexing_lock = threading.Lock()
 
         # Runtime indexed state
         self.vector_store: FAISSVectorStore | None = None
@@ -70,6 +157,28 @@ class RAGService:
             and self.retriever is not None
             and self.vector_store.total_documents > 0
         )
+
+    def _check_memory_limit(self, stage_name: str) -> None:
+        """Evaluate instantaneous RSS against configured safety threshold.
+
+        Note: The application threshold (e.g. 400 MB) is an early warning / safety circuit breaker,
+        not a platform guarantee against the hard 512 MB container ceiling.
+        """
+        import gc
+        curr_rss = get_process_rss_mb()
+        if curr_rss >= self.memory_limit_mb:
+            gc.collect()
+            curr_rss = get_process_rss_mb()
+            if curr_rss >= self.memory_limit_mb:
+                logger.error(
+                    "Memory circuit breaker triggered during %s: current RSS (%.2f MB) exceeds safety threshold (%.2f MB)",
+                    stage_name,
+                    curr_rss,
+                    self.memory_limit_mb,
+                )
+                raise IndexingMemoryExceededError(
+                    f"Indexing aborted during {stage_name}: memory consumption ({curr_rss:.2f} MB) exceeded safety threshold ({self.memory_limit_mb:.2f} MB)."
+                )
 
     def _get_db_session(self) -> tuple[Session, bool]:
         """Obtain active database session and flag indicating if session should be closed."""
@@ -144,7 +253,10 @@ class RAGService:
     def index_repository(
         self, repository_path: str, source_type: str = "local", source_override: str | None = None
     ) -> dict[str, Any]:
-        """Index a local repository for RAG retrieval and persist to database.
+        """Index a local repository incrementally for RAG retrieval and persist to database.
+
+        Processes files in small bounded batches (REPOSITORY_PROCESS_BATCH_SIZE) to ensure
+        memory usage does not grow proportionally with repository size.
 
         Args:
             repository_path: Path to the target local repository folder.
@@ -155,82 +267,148 @@ class RAGService:
             Dictionary payload describing indexing statistics.
 
         Raises:
+            IndexingInProgressError: If an indexing operation is already running.
+            IndexingMemoryExceededError: If RSS exceeds the safety circuit breaker limit.
             InvalidRepositoryError: If path is missing, not a directory, or empty.
         """
-        import resource
-        import sys
+        import gc
 
-        def _get_rss() -> float:
-            rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-            return rss / (1024 * 1024) if sys.platform == "darwin" else rss / 1024
-
-        path = Path(repository_path).resolve()
-        if not path.exists():
-            raise InvalidRepositoryError(f"Repository path does not exist: {repository_path}")
-        if not path.is_dir():
-            raise InvalidRepositoryError(f"Repository path is not a directory: {repository_path}")
-
-        logger.info("[TELEMETRY] Start indexing '%s' (RSS=%.2f MB)", path.name, _get_rss())
+        if not self._indexing_lock.acquire(blocking=False):
+            logger.warning("Indexing rejected: another repository indexing operation is already in progress.")
+            raise IndexingInProgressError(
+                "Repository indexing is already in progress. Please wait for the current indexing job to complete."
+            )
 
         try:
-            loader = RepositoryLoader(path)
-            documents = loader.load_files()
-        except (FileNotFoundError, NotADirectoryError) as exc:
-            raise InvalidRepositoryError(str(exc)) from exc
+            path = Path(repository_path).resolve()
+            if not path.exists():
+                raise InvalidRepositoryError(f"Repository path does not exist: {repository_path}")
+            if not path.is_dir():
+                raise InvalidRepositoryError(f"Repository path is not a directory: {repository_path}")
 
-        if not documents:
-            raise InvalidRepositoryError(f"No supported indexable source files found in {repository_path}")
+            logger.info(
+                "[TELEMETRY stage 5] File discovery start for '%s' (batch_size=%d, memory_limit=%.1f MB, RSS=%.2f MB)",
+                path.name,
+                self.process_batch_size,
+                self.memory_limit_mb,
+                get_process_rss_mb(),
+            )
 
-        logger.info("[TELEMETRY] Loaded %d file(s) (RSS=%.2f MB)", len(documents), _get_rss())
+            try:
+                loader = RepositoryLoader(path)
+                eligible_paths = loader.iter_file_paths()
+            except (FileNotFoundError, NotADirectoryError) as exc:
+                raise InvalidRepositoryError(str(exc)) from exc
 
-        chunks = self.chunker.chunk_documents(documents)
-        logger.info("[TELEMETRY] AST chunking produced %d chunk(s) (RSS=%.2f MB)", len(chunks), _get_rss())
+            if not eligible_paths:
+                raise InvalidRepositoryError(f"No supported indexable source files found in {repository_path}")
 
-        embedded_chunks = self.embedding_engine.embed_documents(chunks)
-        logger.info("[TELEMETRY] Embeddings generated for %d chunk(s) (RSS=%.2f MB)", len(embedded_chunks), _get_rss())
+            total_discovered = len(eligible_paths)
+            repo_name = loader.repository_name
+            source_loc = source_override or str(path)
 
-        vector_store = FAISSVectorStore()
-        vector_store.build_index(embedded_chunks)
-        logger.info("[TELEMETRY] FAISS index built (RSS=%.2f MB)", _get_rss())
+            logger.info(
+                "[TELEMETRY stage 5] Discovered %d eligible file(s) for repository '%s' (RSS=%.2f MB)",
+                total_discovered,
+                repo_name,
+                get_process_rss_mb(),
+            )
 
-        from app.graph.code_graph import CodeGraph
-        code_graph = CodeGraph()
-        code_graph.build_from_documents(chunks)
-        logger.info("[TELEMETRY] CodeGraph built (RSS=%.2f MB)", _get_rss())
+            from app.graph.code_graph import CodeGraph
+            vector_store = FAISSVectorStore()
+            code_graph = CodeGraph()
 
-        retriever = Retriever(self.embedding_engine, vector_store, code_graph=code_graph)
+            total_files_loaded = 0
+            total_chunks_created = 0
+            total_embeddings_created = 0
 
-        # Update service runtime state
-        self.vector_store = vector_store
-        self.retriever = retriever
-        self.indexed_repository_name = loader.repository_name
+            # Stream processing in bounded batches
+            batch_num = 0
+            for file_batch in loader.iter_batches(batch_size=self.process_batch_size):
+                batch_num += 1
+                self._check_memory_limit(f"batch {batch_num} start")
 
-        # Persist to relational database layer
-        source_loc = source_override or str(path)
-        self._persist_indexed_repository(
-            repository_name=loader.repository_name,
-            source=source_loc,
-            source_type=source_type,
-            embedded_chunks=embedded_chunks,
-        )
-        logger.info("[TELEMETRY] Database persistence complete (RSS=%.2f MB)", _get_rss())
+                batch_files_count = len(file_batch)
+                total_files_loaded += batch_files_count
 
-        logger.info(
-            "Indexed repository '%s': %d files, %d chunks, %d embeddings (Final RSS=%.2f MB)",
-            loader.repository_name,
-            len(documents),
-            len(chunks),
-            len(embedded_chunks),
-            _get_rss(),
-        )
+                # AST chunking for this batch
+                batch_chunks = self.chunker.chunk_documents(file_batch)
+                batch_chunks_count = len(batch_chunks)
+                total_chunks_created += batch_chunks_count
 
-        return {
-            "repository": loader.repository_name,
-            "files_loaded": len(documents),
-            "chunks_created": len(chunks),
-            "embeddings_created": len(embedded_chunks),
-            "status": "indexed",
-        }
+                # Release file batch contents immediately
+                del file_batch
+
+                # Embed chunks for this batch (batch_size=1)
+                batch_embedded = self.embedding_engine.embed_documents(batch_chunks)
+                batch_embeddings_count = len(batch_embedded)
+                total_embeddings_created += batch_embeddings_count
+
+                # Check memory after embedding
+                self._check_memory_limit(f"batch {batch_num} post-embedding")
+
+                # Incrementally add to FAISS index
+                vector_store.add_documents(batch_embedded)
+
+                # Incrementally add to CodeGraph
+                code_graph.add_documents(batch_embedded)
+
+                # Incrementally persist to database
+                self._persist_indexed_repository(
+                    repository_name=repo_name,
+                    source=source_loc,
+                    source_type=source_type,
+                    embedded_chunks=batch_embedded,
+                )
+
+                # Release batch objects and collect garbage
+                del batch_chunks
+                del batch_embedded
+                gc.collect()
+
+                # Check memory after persistence & GC
+                self._check_memory_limit(f"batch {batch_num} post-persistence")
+
+                logger.info(
+                    "[TELEMETRY stage 9] Batch %d complete: processed %d files, %d chunks (Cumulative: %d/%d files, %d chunks, RSS=%.2f MB)",
+                    batch_num,
+                    batch_files_count,
+                    batch_chunks_count,
+                    total_files_loaded,
+                    total_discovered,
+                    total_chunks_created,
+                    get_process_rss_mb(),
+                )
+
+            if total_files_loaded == 0:
+                raise InvalidRepositoryError(f"No supported indexable source files found in {repository_path}")
+
+            retriever = Retriever(self.embedding_engine, vector_store, code_graph=code_graph)
+
+            # Update service runtime state
+            self.vector_store = vector_store
+            self.retriever = retriever
+            self.indexed_repository_name = repo_name
+
+            final_rss = get_process_rss_mb()
+            logger.info(
+                "[TELEMETRY stage 14] Incremental indexing complete for '%s': %d files, %d chunks, %d embeddings (Final RSS=%.2f MB)",
+                repo_name,
+                total_files_loaded,
+                total_chunks_created,
+                total_embeddings_created,
+                final_rss,
+            )
+
+            return {
+                "repository": repo_name,
+                "files_loaded": total_files_loaded,
+                "chunks_created": total_chunks_created,
+                "embeddings_created": total_embeddings_created,
+                "status": "indexed",
+            }
+        finally:
+            self._indexing_lock.release()
 
     def index_github_repository(self, github_url: str) -> dict[str, Any]:
         """Index a public GitHub repository by URL and persist to database.
@@ -242,13 +420,17 @@ class RAGService:
             Dictionary payload matching IndexRepositoryResponse schema.
 
         Raises:
+            IndexingInProgressError: If an indexing operation is already running.
             InvalidRepositoryError: If GitHub validation, cloning, or document loading fails.
         """
+        logger.info("[TELEMETRY stage 3] Repository clone start: %s (RSS=%.2f MB)", github_url, get_process_rss_mb())
         github_loader = GitHubRepositoryLoader()
         try:
             local_repo_path = github_loader.clone_repository(github_url)
         except GitHubLoaderError as exc:
             raise InvalidRepositoryError(str(exc)) from exc
+
+        logger.info("[TELEMETRY stage 4] Repository clone complete: %s (RSS=%.2f MB)", local_repo_path, get_process_rss_mb())
 
         return self.index_repository(
             str(local_repo_path), source_type="github", source_override=github_url
