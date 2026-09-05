@@ -10,7 +10,7 @@ import { IndexModal } from "@/components/IndexModal";
 import { SettingsModal } from "@/components/SettingsModal";
 import { HistoryDrawer } from "@/components/HistoryDrawer";
 import { queryCodebase, AuthError } from "@/lib/api-client";
-import { QueryResponse, IndexRepositoryResponse } from "@/lib/types";
+import { QueryResponse, IndexRepositoryResponse, SourceDocument } from "@/lib/types";
 
 interface ConversationItem {
   query: string;
@@ -23,6 +23,7 @@ export default function Home() {
   const [conversations, setConversations] = useState<ConversationItem[]>([]);
   const [queryHistory, setQueryHistory] = useState<string[]>([]);
   const [isLoadingQuery, setIsLoadingQuery] = useState<boolean>(false);
+  const [activeEvidenceSources, setActiveEvidenceSources] = useState<SourceDocument[]>([]);
   const [selectedEvidenceIndex, setSelectedEvidenceIndex] = useState<number>(0);
   const [isEvidenceOpen, setIsEvidenceOpen] = useState<boolean>(true);
 
@@ -78,9 +79,12 @@ export default function Home() {
         )
       );
 
-      // Automatically focus first source and open evidence drawer
+      // Automatically focus first source of this response and open evidence panel
       setSelectedEvidenceIndex(0);
-      setIsEvidenceOpen(true);
+      if (response.sources && response.sources.length > 0) {
+        setActiveEvidenceSources(response.sources);
+        setIsEvidenceOpen(true);
+      }
     } catch (err: any) {
       if (err instanceof AuthError) {
         setAuthErrorMessage(err.message);
@@ -100,6 +104,7 @@ export default function Home() {
 
   const handleNewChat = () => {
     setConversations([]);
+    setActiveEvidenceSources([]);
     setSelectedEvidenceIndex(0);
   };
 
@@ -109,13 +114,6 @@ export default function Home() {
       localStorage.removeItem("devmind_query_history");
     } catch {}
   };
-
-  // Get active sources from the latest conversation response
-  const latestResponse = conversations
-    .slice()
-    .reverse()
-    .find((c) => c.response)?.response;
-  const currentSources = latestResponse?.sources || [];
 
   return (
     <div className="flex h-screen w-full overflow-hidden bg-[#111111] text-[#e2e2e2] font-sans antialiased">
@@ -150,21 +148,38 @@ export default function Home() {
           ) : (
             <>
               {/* Central Conversation Canvas */}
-              <ConversationView
-                conversations={conversations}
-                isLoading={isLoadingQuery}
-                onSendQuery={handleSendQuery}
-                onSelectEvidence={(idx) => {
-                  setSelectedEvidenceIndex(idx);
-                  setIsEvidenceOpen(true);
-                }}
-                selectedEvidenceIndex={selectedEvidenceIndex}
-              />
+              <div className="flex-1 flex flex-col min-w-0 h-full overflow-hidden relative">
+                {/* Evidence Panel Re-open Pill (if closed and sources available) */}
+                {!isEvidenceOpen && activeEvidenceSources.length > 0 && (
+                  <div className="absolute top-3 right-4 z-20 animate-fade-in-up">
+                    <button
+                      type="button"
+                      onClick={() => setIsEvidenceOpen(true)}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#182338] hover:bg-[#304671] text-[#adc6ff] border border-[#3B82F6]/50 shadow-md text-xs font-mono transition-all cursor-pointer"
+                      title="Open Evidence Inspector"
+                    >
+                      <span>Inspect Evidence ({activeEvidenceSources.length})</span>
+                    </button>
+                  </div>
+                )}
 
-              {/* Right Side Evidence Panel */}
-              {isEvidenceOpen && currentSources.length > 0 && (
+                <ConversationView
+                  conversations={conversations}
+                  isLoading={isLoadingQuery}
+                  onSendQuery={handleSendQuery}
+                  onSelectEvidence={(idx, sources) => {
+                    setSelectedEvidenceIndex(idx);
+                    setActiveEvidenceSources(sources);
+                    setIsEvidenceOpen(true);
+                  }}
+                  selectedEvidenceIndex={selectedEvidenceIndex}
+                />
+              </div>
+
+              {/* Right Side Evidence Inspector Panel */}
+              {isEvidenceOpen && activeEvidenceSources.length > 0 && (
                 <EvidencePanel
-                  sources={currentSources}
+                  sources={activeEvidenceSources}
                   selectedSourceIndex={selectedEvidenceIndex}
                   onSelectSource={(idx) => setSelectedEvidenceIndex(idx)}
                   onClose={() => setIsEvidenceOpen(false)}

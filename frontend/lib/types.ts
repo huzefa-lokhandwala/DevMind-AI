@@ -34,10 +34,13 @@ export interface QueryRequest {
 export interface SourceDocument {
   repository: string;
   file: string;
+  file_path?: string | null;
   symbol?: string | null;
   start_line?: number | null;
   end_line?: number | null;
   score: number;
+  snippet?: string | null;
+  language?: string | null;
 }
 
 export interface QueryResponse {

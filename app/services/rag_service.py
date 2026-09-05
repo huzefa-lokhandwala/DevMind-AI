@@ -490,10 +490,13 @@ class RAGService:
                 {
                     "repository": doc.repository_name,
                     "file": doc.file_name,
+                    "file_path": doc.file_path,
                     "symbol": symbol,
                     "start_line": doc.start_line,
                     "end_line": doc.end_line,
                     "score": round(res.score, 4),
+                    "snippet": doc.content[:1500] if doc.content else None,
+                    "language": doc.language,
                 }
             )
 

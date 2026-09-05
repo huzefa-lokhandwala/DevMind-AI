@@ -35,10 +35,13 @@ class SourceDocument(BaseModel):
 
     repository: str
     file: str
+    file_path: Optional[str] = None
     symbol: Optional[str] = None
     start_line: Optional[int] = None
     end_line: Optional[int] = None
     score: float
+    snippet: Optional[str] = None
+    language: Optional[str] = None
 
 
 class QueryResponse(BaseModel):
