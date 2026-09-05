@@ -41,6 +41,36 @@ class ContextAssembler:
         "9. Do NOT generate a redundant 'Sources' or 'Citations' section at the end of your response, as the application interface automatically renders the retrieved source evidence cards."
     )
 
+    GENERAL_SYSTEM_PROMPT = (
+        "You are DevMind AI, an expert, friendly Senior Software Engineer and AI Assistant.\n"
+        "GUIDELINES:\n"
+        "1. Answer the user's general or conceptual question directly, accurately, and engagingly.\n"
+        "2. Use structured Markdown with concise explanations, code examples, bullet points, or analogies where helpful.\n"
+        "3. For greetings and casual conversation, respond naturally and warmly as a helpful assistant.\n"
+        "4. Do NOT say 'I found no matching repository evidence' or 'this repository does not contain information about this'.\n"
+        "5. Do NOT reference unneeded repository mechanisms or fabricate citations."
+    )
+
+    MIXED_SYSTEM_PROMPT = (
+        "You are DevMind AI, an expert Senior Software Engineer and Codebase Assistant.\n"
+        "The user is asking BOTH a general conceptual question and a repository-specific question.\n"
+        "GUIDELINES:\n"
+        "1. FIRST provide a clear, concise general technical explanation of the requested concept.\n"
+        "2. THEN clearly explain how this specific repository implements, configures, or uses the concept using ONLY the retrieved code context below.\n"
+        "3. Clearly separate the general explanation from the repository-specific implementation details using Markdown headers or sections.\n"
+        "4. Ground all repository claims strictly on the retrieved code chunks.\n"
+        "5. Do NOT generate a redundant 'Sources' or 'Citations' section at the end of your response."
+    )
+
+    def assemble_general(self, query: str) -> PromptContext:
+        """Assemble PromptContext for general/conversational queries without codebase retrieval."""
+        return PromptContext(
+            system_prompt=self.GENERAL_SYSTEM_PROMPT,
+            user_question=query,
+            retrieved_context="",
+            citations=[],
+        )
+
     def __init__(self, system_prompt: str | None = None) -> None:
         """Initialize ContextAssembler with an optional custom system prompt.
 

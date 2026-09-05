@@ -1,18 +1,23 @@
 /**
  * Dedicated, typed API Client for DevMind AI FastAPI backend.
- * Handles API Base URL, X-API-Key headers, response parsing, and structured error boundaries.
+ * Handles API Base URL, X-API-Key headers, X-Session-ID isolation,
+ * response parsing, and structured error boundaries.
  */
 
 import {
+  ConversationDetail,
+  ConversationSummary,
   HealthStatus,
   IndexRepositoryRequest,
   IndexRepositoryResponse,
+  JobStatusResponse,
   QueryRequest,
   QueryResponse,
   ReadinessStatus,
 } from "./types";
 
 const STORAGE_KEY_API_KEY = "devmind_api_key";
+const STORAGE_KEY_SESSION_ID = "devmind_session_id";
 const DEFAULT_API_BASE_URL = "http://localhost:8000";
 
 export class ApiError extends Error {
@@ -110,6 +115,21 @@ export function getMaskedApiKey(key: string): string {
 }
 
 /**
+ * Get or create stable anonymous browser session ID in localStorage.
+ */
+export function getOrCreateSessionId(): string {
+  if (typeof window === "undefined") {
+    return "server-session";
+  }
+  let sessionId = localStorage.getItem(STORAGE_KEY_SESSION_ID);
+  if (!sessionId) {
+    sessionId = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : "sess-" + Math.random().toString(36).slice(2, 11);
+    localStorage.setItem(STORAGE_KEY_SESSION_ID, sessionId);
+  }
+  return sessionId;
+}
+
+/**
  * Internal helper for fetching with headers, error translation, and network handling.
  */
 async function fetchApi<T>(
@@ -123,6 +143,7 @@ async function fetchApi<T>(
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     Accept: "application/json",
+    "X-Session-ID": getOrCreateSessionId(),
     ...(options.headers as Record<string, string>),
   };
 
@@ -140,6 +161,9 @@ async function fetchApi<T>(
     });
 
     if (response.ok) {
+      if (response.status === 204) {
+        return {} as T;
+      }
       return (await response.json()) as T;
     }
 
@@ -205,7 +229,14 @@ export async function indexRepository(
 }
 
 /**
- * Query the indexed codebase with natural language (Protected endpoint).
+ * Check asynchronous status and queue position of an indexing job (Protected endpoint).
+ */
+export async function getIndexingStatus(jobId: string): Promise<JobStatusResponse> {
+  return fetchApi<JobStatusResponse>(`/repositories/index/status/${jobId}`, { method: "GET" }, true);
+}
+
+/**
+ * Query the indexed codebase with natural language and intent routing (Protected endpoint).
  */
 export async function queryCodebase(payload: QueryRequest): Promise<QueryResponse> {
   return fetchApi<QueryResponse>(
@@ -216,4 +247,49 @@ export async function queryCodebase(payload: QueryRequest): Promise<QueryRespons
     },
     true
   );
+}
+
+/**
+ * List all persistent conversations for the current session.
+ */
+export async function listConversations(): Promise<ConversationSummary[]> {
+  return fetchApi<ConversationSummary[]>("/conversations", { method: "GET" }, true);
+}
+
+/**
+ * Create a new conversation.
+ */
+export async function createConversation(
+  title = "New Chat",
+  repository_name?: string | null
+): Promise<ConversationDetail> {
+  return fetchApi<ConversationDetail>(
+    "/conversations",
+    {
+      method: "POST",
+      body: JSON.stringify({ title, repository_name }),
+    },
+    true
+  );
+}
+
+/**
+ * Get full conversation history by conversation ID.
+ */
+export async function getConversation(conversationId: string): Promise<ConversationDetail> {
+  return fetchApi<ConversationDetail>(`/conversations/${conversationId}`, { method: "GET" }, true);
+}
+
+/**
+ * Delete a specific conversation by ID.
+ */
+export async function deleteConversation(conversationId: string): Promise<void> {
+  return fetchApi<void>(`/conversations/${conversationId}`, { method: "DELETE" }, true);
+}
+
+/**
+ * Clear all conversations for the current session.
+ */
+export async function clearAllConversations(): Promise<void> {
+  return fetchApi<void>("/conversations", { method: "DELETE" }, true);
 }

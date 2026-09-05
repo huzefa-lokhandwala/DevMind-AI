@@ -20,6 +20,10 @@ class QueryRequest(BaseModel):
         gt=0,
         description="Maximum number of context chunks to retrieve (must be > 0).",
     )
+    conversation_id: Optional[str] = Field(
+        default=None,
+        description="Optional conversation ID to append message turns to persistent chat history.",
+    )
 
     @field_validator("query")
     @classmethod
@@ -52,3 +56,5 @@ class QueryResponse(BaseModel):
     provider: str
     model: str
     latency_ms: float
+    intent: Optional[str] = "REPOSITORY"
+    conversation_id: Optional[str] = None

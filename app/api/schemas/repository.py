@@ -43,3 +43,19 @@ class IndexRepositoryResponse(BaseModel):
     chunks_created: int
     embeddings_created: int
     status: str
+    job_id: Optional[str] = None
+    queue_position: Optional[int] = 0
+
+
+class JobStatusResponse(BaseModel):
+    """Response payload for GET /repositories/index/status/{job_id}."""
+
+    job_id: str
+    repository_source: str
+    source_type: str
+    status: str  # "QUEUED", "RUNNING", "COMPLETED", "FAILED"
+    queue_position: int = 0
+    result: Optional[IndexRepositoryResponse] = None
+    error: Optional[str] = None
+    created_at: float
+    updated_at: float

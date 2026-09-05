@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from typing import Optional
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 
 from google import genai
 from app.api.auth import verify_api_key
@@ -21,6 +23,9 @@ def get_rag_service(request: Request) -> RAGService:
     return request.app.state.rag_service
 
 
+from app.utils.session_validator import validate_optional_session_id
+
+
 @router.post(
     "/query",
     response_model=QueryResponse,
@@ -29,19 +34,26 @@ def get_rag_service(request: Request) -> RAGService:
 )
 def query_repository(
     payload: QueryRequest,
+    session_id: Optional[str] = Depends(validate_optional_session_id),
     rag_service: RAGService = Depends(get_rag_service),
 ) -> QueryResponse:
-    """Query the indexed codebase using natural language.
+    """Query the indexed codebase or ask general questions with intent routing.
 
     Args:
-        payload: QueryRequest containing query string and optional top_k.
+        payload: QueryRequest containing query string, optional top_k, and optional conversation_id.
+        session_id: Extracted browser session ID from X-Session-ID.
         rag_service: Injected RAGService instance.
 
     Returns:
-        QueryResponse containing generated answer, source citations, model metadata, and latency.
+        QueryResponse containing generated answer, source citations, model metadata, intent, and latency.
     """
     try:
-        result = rag_service.query(payload.query, top_k=payload.top_k)
+        result = rag_service.query(
+            payload.query,
+            top_k=payload.top_k,
+            session_id=session_id,
+            conversation_id=payload.conversation_id,
+        )
         return QueryResponse(**result)
     except RepositoryNotIndexedError as exc:
         logger.warning("Query attempted on unindexed repository (400 Bad Request): %s", exc)

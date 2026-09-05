@@ -12,18 +12,25 @@ from sqlalchemy.orm import Session
 
 from app.chunking.code_chunker import CodeChunker
 from app.db.crud import (
+    add_message,
+    create_conversation,
     create_or_update_repository,
+    get_conversation,
     get_repository_by_name,
     save_query_log,
     save_repository_documents,
+    update_conversation_title,
 )
 from app.db.database import SessionLocal
 from app.embeddings.embedding_engine import EmbeddingEngine
 from app.llm.gemini_provider import GeminiProvider
 from app.loaders import GitHubLoaderError, GitHubRepositoryLoader, RepositoryLoader
 from app.models.document import Document
-from app.prompts.context_assembler import ContextAssembler
+from app.prompts.context_assembler import ContextAssembler, PromptContext
 from app.retrieval.retriever import Retriever
+from app.routing.intent_classifier import QueryIntent, classify_intent
+from app.services.indexing_coordinator import IndexingCoordinator
+from app.utils.title_generator import generate_conversation_title
 from app.vector_store.faiss_store import FAISSVectorStore
 
 logger = logging.getLogger(__name__)
@@ -106,6 +113,7 @@ class RAGService:
         db_session: Session | None = None,
         process_batch_size: int | None = None,
         memory_limit_mb: float | None = None,
+        indexing_coordinator: IndexingCoordinator | None = None,
     ) -> None:
         """Initialize RAGService components once at application startup."""
         import os
@@ -116,6 +124,8 @@ class RAGService:
         self.context_assembler = ContextAssembler()
         self.chunker = CodeChunker()
         self.db_session = db_session
+        self.indexing_coordinator = indexing_coordinator or IndexingCoordinator()
+        self.indexing_coordinator.set_executor(self._execute_indexing_job)
 
         # Bounded repository processing batch size
         env_batch = os.getenv("REPOSITORY_PROCESS_BATCH_SIZE")
@@ -436,69 +446,108 @@ class RAGService:
             str(local_repo_path), source_type="github", source_override=github_url
         )
 
-    def query(self, query_text: str, top_k: int = 5) -> dict[str, Any]:
-        """Query the currently indexed repository.
+    def _execute_indexing_job(self, source: str, source_type: str) -> dict[str, Any]:
+        """Internal callback invoked by IndexingCoordinator worker to execute queued indexing."""
+        if source_type == "github":
+            return self.index_github_repository(source)
+        return self.index_repository(source)
+
+    def query(
+        self,
+        query_text: str,
+        top_k: int = 5,
+        session_id: str | None = None,
+        conversation_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Query the system using intent routing (GENERAL, REPOSITORY, MIXED).
 
         Args:
             query_text: User question string.
             top_k: Number of relevant context chunks to retrieve.
+            session_id: Optional anonymous browser session identifier.
+            conversation_id: Optional conversation identifier for message persistence.
 
         Returns:
             Dictionary payload matching QueryResponse schema.
 
         Raises:
-            RepositoryNotIndexedError: If no repository has been indexed yet.
+            RepositoryNotIndexedError: If repository question is asked before indexing.
             ValueError: If query is empty or whitespace-only.
         """
-        if not self.is_indexed or self.retriever is None:
-            raise RepositoryNotIndexedError(
-                "No repository has been indexed yet. Call /repositories/index first."
-            )
-
         query_clean = query_text.strip()
         if not query_clean:
             raise ValueError("Query string must not be empty or whitespace-only.")
 
+        # Classify intent deterministically without extra LLM overhead
+        intent = classify_intent(query_clean)
+        logger.info("Query '%s' classified as intent: %s", query_clean[:60], intent.value)
+
         t0 = time.perf_counter()
-        search_results = self.retriever.retrieve(
-            query_clean, k=top_k, repository_name=self.indexed_repository_name
-        )
-        t1 = time.perf_counter()
-        prompt_context = self.context_assembler.assemble(query_clean, search_results)
-        t2 = time.perf_counter()
-        llm_response = self.llm_provider.generate(prompt_context)
-        t3 = time.perf_counter()
+        sources: list[dict[str, Any]] = []
 
-        retrieval_ms = round((t1 - t0) * 1000, 2)
-        assembly_ms = round((t2 - t1) * 1000, 2)
-        generation_ms = round((t3 - t2) * 1000, 2)
-        total_latency_ms = round((t3 - t0) * 1000, 2)
+        if intent == QueryIntent.GENERAL:
+            # GENERAL intent: Bypass repository retrieval completely
+            prompt_context = self.context_assembler.assemble_general(query_clean)
+            t1 = time.perf_counter()
+            llm_response = self.llm_provider.generate(prompt_context)
+            t2 = time.perf_counter()
+            retrieval_ms = 0.0
+            assembly_ms = round((t1 - t0) * 1000, 2)
+            generation_ms = round((t2 - t1) * 1000, 2)
+        else:
+            # REPOSITORY or MIXED intent: Requires indexed repository
+            if not self.is_indexed or self.retriever is None:
+                raise RepositoryNotIndexedError(
+                    "No repository has been indexed yet. Call /repositories/index first."
+                )
 
+            t0_retr = time.perf_counter()
+            search_results = self.retriever.retrieve(
+                query_clean, k=top_k, repository_name=self.indexed_repository_name
+            )
+            t1_retr = time.perf_counter()
+
+            if intent == QueryIntent.MIXED:
+                # Custom mixed prompt context
+                assembler = ContextAssembler(system_prompt=self.context_assembler.MIXED_SYSTEM_PROMPT)
+                prompt_context = assembler.assemble(query_clean, search_results)
+            else:
+                prompt_context = self.context_assembler.assemble(query_clean, search_results)
+
+            t2_asm = time.perf_counter()
+            llm_response = self.llm_provider.generate(prompt_context)
+            t3_gen = time.perf_counter()
+
+            retrieval_ms = round((t1_retr - t0_retr) * 1000, 2)
+            assembly_ms = round((t2_asm - t1_retr) * 1000, 2)
+            generation_ms = round((t3_gen - t2_asm) * 1000, 2)
+
+            for res in search_results:
+                doc = res.document
+                symbol = doc.function_name or doc.class_name or None
+                sources.append(
+                    {
+                        "repository": doc.repository_name,
+                        "file": doc.file_name,
+                        "file_path": doc.file_path,
+                        "symbol": symbol,
+                        "start_line": doc.start_line,
+                        "end_line": doc.end_line,
+                        "score": round(res.score, 4),
+                        "snippet": doc.content[:1500] if doc.content else None,
+                        "language": doc.language,
+                    }
+                )
+
+        total_latency_ms = round((time.perf_counter() - t0) * 1000, 2)
         logger.info(
-            "Query Latency Breakdown: retrieval=%.2fms, assembly=%.2fms, generation=%.2fms (total=%.2fms)",
+            "Query Latency Breakdown [%s]: retrieval=%.2fms, assembly=%.2fms, generation=%.2fms (total=%.2fms)",
+            intent.value,
             retrieval_ms,
             assembly_ms,
             generation_ms,
             total_latency_ms,
         )
-
-        sources: list[dict[str, Any]] = []
-        for res in search_results:
-            doc = res.document
-            symbol = doc.function_name or doc.class_name or None
-            sources.append(
-                {
-                    "repository": doc.repository_name,
-                    "file": doc.file_name,
-                    "file_path": doc.file_path,
-                    "symbol": symbol,
-                    "start_line": doc.start_line,
-                    "end_line": doc.end_line,
-                    "score": round(res.score, 4),
-                    "snippet": doc.content[:1500] if doc.content else None,
-                    "language": doc.language,
-                }
-            )
 
         # Persist query log to database
         self._persist_query_log(
@@ -509,10 +558,64 @@ class RAGService:
             latency_ms=llm_response.latency_ms,
         )
 
+        # Persist conversation & messages if session_id is provided
+        active_conversation_id = conversation_id
+        if session_id:
+            try:
+                db, auto_close = self._get_db_session()
+                try:
+                    conv = None
+                    if conversation_id:
+                        conv = get_conversation(db, conversation_id=conversation_id, session_id=session_id)
+                    if not conv:
+                        new_title = generate_conversation_title(query_clean)
+                        conv = create_conversation(
+                            db=db,
+                            session_id=session_id,
+                            title=new_title,
+                            repository_name=self.indexed_repository_name,
+                            conversation_id=conversation_id,
+                        )
+                    elif conv.title in ("New Chat", "General Query") and intent != QueryIntent.GENERAL:
+                        # Derive informative title once user asks specific query
+                        updated_title = generate_conversation_title(query_clean)
+                        update_conversation_title(db, conv.id, session_id, updated_title)
+
+                    active_conversation_id = conv.id
+
+                    # Save user message
+                    add_message(
+                        db=db,
+                        conversation_id=conv.id,
+                        role="user",
+                        content=query_clean,
+                        intent=intent.value,
+                    )
+
+                    # Save assistant message
+                    add_message(
+                        db=db,
+                        conversation_id=conv.id,
+                        role="assistant",
+                        content=llm_response.answer,
+                        intent=intent.value,
+                        sources=sources,
+                        provider=llm_response.provider,
+                        model=llm_response.model,
+                        latency_ms=llm_response.latency_ms,
+                    )
+                finally:
+                    if auto_close:
+                        db.close()
+            except Exception as exc:
+                logger.warning("Failed persisting message to conversation history: %s", exc)
+
         return {
             "answer": llm_response.answer,
             "sources": sources,
             "provider": llm_response.provider,
             "model": llm_response.model,
             "latency_ms": llm_response.latency_ms,
+            "intent": intent.value,
+            "conversation_id": active_conversation_id,
         }

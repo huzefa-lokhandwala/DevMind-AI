@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   X,
   GitBranch,
@@ -8,11 +8,12 @@ import {
   CheckCircle2,
   AlertCircle,
   RefreshCw,
-  Layers,
-  FileCode,
+  Info,
+  Clock,
   Sparkles,
+  Layers,
 } from "lucide-react";
-import { indexRepository, AuthError } from "@/lib/api-client";
+import { indexRepository, getIndexingStatus, AuthError } from "@/lib/api-client";
 import { IndexRepositoryResponse } from "@/lib/types";
 
 interface IndexModalProps {
@@ -24,6 +25,14 @@ interface IndexModalProps {
 
 type IndexMode = "github" | "local";
 
+const EDUCATIONAL_TIPS = [
+  "DevMind creates a local semantic search index so future questions can retrieve the most relevant parts of your codebase.",
+  "The free development server intentionally uses conservative memory settings (512 MB RAM), so indexing is slower but safer.",
+  "After indexing, you can ask questions about specific files, functions, or codebase architecture.",
+  "You can inspect the exact retrieved source code chunks in the Evidence Inspector after each answer.",
+  "Deterministic query routing ensures general technical questions don't trigger unnecessary codebase retrieval.",
+];
+
 export function IndexModal({
   isOpen,
   onClose,
@@ -34,14 +43,82 @@ export function IndexModal({
   const [githubUrl, setGithubUrl] = useState<string>("");
   const [localPath, setLocalPath] = useState<string>("");
   const [isLoading, setIsLoading] = useState<boolean>(false);
-  const [currentStage, setCurrentStage] = useState<number>(0);
+  const [isQueued, setIsQueued] = useState<boolean>(false);
+  const [queuePosition, setQueuePosition] = useState<number>(0);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [result, setResult] = useState<IndexRepositoryResponse | null>(null);
+  const [tipIndex, setTipIndex] = useState<number>(0);
+
+  const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Rotating tips timer
+  useEffect(() => {
+    if (!isOpen || (!isLoading && !isQueued)) return;
+    const interval = setInterval(() => {
+      setTipIndex((prev) => (prev + 1) % EDUCATIONAL_TIPS.length);
+    }, 6000);
+    return () => clearInterval(interval);
+  }, [isOpen, isLoading, isQueued]);
+
+  // Cleanup polling on unmount
+  useEffect(() => {
+    return () => {
+      if (pollingIntervalRef.current) {
+        clearInterval(pollingIntervalRef.current);
+      }
+    };
+  }, []);
 
   if (!isOpen) return null;
 
+  const pollJobStatus = (jobId: string) => {
+    if (pollingIntervalRef.current) clearInterval(pollingIntervalRef.current);
+
+    pollingIntervalRef.current = setInterval(async () => {
+      try {
+        const statusData = await getIndexingStatus(jobId);
+        if (statusData.status === "QUEUED") {
+          setIsQueued(true);
+          setQueuePosition(statusData.queue_position);
+        } else if (statusData.status === "RUNNING") {
+          setIsQueued(false);
+          setIsLoading(true);
+        } else if (statusData.status === "COMPLETED") {
+          if (pollingIntervalRef.current) clearInterval(pollingIntervalRef.current);
+          setIsLoading(false);
+          setIsQueued(false);
+          const finalRes = statusData.result || {
+            repository: statusData.repository_source,
+            files_loaded: 0,
+            chunks_created: 0,
+            embeddings_created: 0,
+            status: "indexed",
+          };
+          setResult(finalRes);
+          onSuccess(finalRes);
+        } else if (statusData.status === "FAILED") {
+          if (pollingIntervalRef.current) clearInterval(pollingIntervalRef.current);
+          setIsLoading(false);
+          setIsQueued(false);
+          setErrorMsg(statusData.error || "Repository indexing failed.");
+        }
+      } catch (err: any) {
+        // Silently retry polling unless explicit auth error
+        if (err instanceof AuthError) {
+          if (pollingIntervalRef.current) clearInterval(pollingIntervalRef.current);
+          setIsLoading(false);
+          setIsQueued(false);
+          onAuthRequired(err.message);
+          onClose();
+        }
+      }
+    }, 1500);
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isLoading || isQueued) return;
+
     setErrorMsg(null);
     setResult(null);
 
@@ -62,28 +139,21 @@ export function IndexModal({
     }
 
     setIsLoading(true);
-    setCurrentStage(1);
-
-    // Timers to provide step feedback during backend indexing
-    const timer1 = setTimeout(() => setCurrentStage(2), 1200);
-    const timer2 = setTimeout(() => setCurrentStage(3), 2800);
-    const timer3 = setTimeout(() => setCurrentStage(4), 4500);
 
     try {
       const res = await indexRepository(payload);
-      clearTimeout(timer1);
-      clearTimeout(timer2);
-      clearTimeout(timer3);
-      setCurrentStage(5);
-      setIsLoading(false);
-      setResult(res);
-      onSuccess(res);
+      if (res.status === "queued" && res.job_id) {
+        setIsQueued(true);
+        setQueuePosition(res.queue_position || 1);
+        pollJobStatus(res.job_id);
+      } else {
+        setIsLoading(false);
+        setResult(res);
+        onSuccess(res);
+      }
     } catch (err: any) {
-      clearTimeout(timer1);
-      clearTimeout(timer2);
-      clearTimeout(timer3);
       setIsLoading(false);
-      setCurrentStage(0);
+      setIsQueued(false);
       if (err instanceof AuthError) {
         onAuthRequired(err.message);
         onClose();
@@ -94,62 +164,54 @@ export function IndexModal({
   };
 
   const handleClose = () => {
-    if (!isLoading) {
+    if (!isLoading && !isQueued) {
+      if (pollingIntervalRef.current) clearInterval(pollingIntervalRef.current);
       setErrorMsg(null);
       setResult(null);
-      setCurrentStage(0);
       onClose();
     }
   };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#111111]/80 backdrop-blur-[2px] animate-fade-in-up font-sans">
-      <div className="w-full max-w-[480px] bg-[#1C1C1C] border border-[#2A2A2A] rounded-lg overflow-hidden flex flex-col shadow-[0_4px_12px_rgba(0,0,0,0.5)]">
+      <div className="w-full max-w-[500px] bg-[#1C1C1C] border border-[#2A2A2A] rounded-lg overflow-hidden flex flex-col shadow-[0_4px_16px_rgba(0,0,0,0.6)]">
         {/* Header */}
         <div className="p-4 border-b border-[#2A2A2A] flex justify-between items-center bg-[#171717]">
           <div>
             <h2 className="text-base font-semibold text-[#e2e2e2]">
-              {isLoading ? "Indexing Repository" : "Index Repository"}
+              {isQueued
+                ? "Indexing Queued"
+                : isLoading
+                ? "Indexing in Progress"
+                : "Index Repository"}
             </h2>
             <p className="text-xs text-[#8c909f] mt-0.5">
-              {isLoading
-                ? "Processing AST symbols & semantic embeddings"
-                : "Load and index codebase into DevMind RAG engine"}
+              {isQueued
+                ? "Waiting for active indexing job to finish"
+                : isLoading
+                ? "Building local FAISS semantic search index"
+                : "Prepare codebase for semantic retrieval and Q&A"}
             </p>
           </div>
           <button
             onClick={handleClose}
-            disabled={isLoading}
+            disabled={isLoading || isQueued}
             className="text-[#8c909f] hover:text-[#e2e2e2] p-1 rounded transition-colors disabled:opacity-30 cursor-pointer"
           >
             <X className="w-4 h-4" />
           </button>
         </div>
 
-        {/* Progress Bar when loading */}
-        {isLoading && (
-          <div className="h-[2px] w-full bg-[#2A2A2A]">
-            <div
-              className="h-full bg-[#3B82F6] transition-all duration-500"
-              style={{
-                width:
-                  currentStage === 1
-                    ? "25%"
-                    : currentStage === 2
-                    ? "50%"
-                    : currentStage === 3
-                    ? "75%"
-                    : currentStage >= 4
-                    ? "95%"
-                    : "10%",
-              }}
-            ></div>
+        {/* Indeterminate Animated Progress Bar when active */}
+        {(isLoading || isQueued) && (
+          <div className="h-[2px] w-full bg-[#2A2A2A] overflow-hidden relative">
+            <div className="h-full bg-[#3B82F6] absolute w-1/3 animate-pulse left-1/3"></div>
           </div>
         )}
 
         {/* Body */}
         <div className="p-5 flex flex-col gap-4">
-          {!isLoading && !result && (
+          {!isLoading && !isQueued && !result && (
             <>
               {/* Segmented Control */}
               <div className="flex bg-[#121414] border border-[#2A2A2A] rounded p-[2px] w-full text-xs font-medium">
@@ -200,7 +262,7 @@ export function IndexModal({
                   />
                   <span className="text-[11px] text-[#8c909f]">
                     {mode === "github"
-                      ? "Clones shallow depth (--depth 1) securely."
+                      ? "Clones shallow depth securely and parses AST symbols."
                       : "Resolves supported source files (.py, .ts, .tsx, .js, .json, etc.)."}
                   </span>
                 </div>
@@ -232,64 +294,64 @@ export function IndexModal({
             </>
           )}
 
-          {/* Indexing In Progress Stages UI (matching Stitch) */}
-          {isLoading && (
-            <div className="flex flex-col gap-3 py-1">
-              <ul className="flex flex-col gap-2.5 text-xs">
-                <li className="flex items-center gap-2.5">
-                  {currentStage > 1 ? (
-                    <CheckCircle2 className="w-4 h-4 text-[#10B981] shrink-0" />
-                  ) : (
-                    <RefreshCw className="w-4 h-4 text-[#3B82F6] animate-spin shrink-0" />
-                  )}
-                  <span className={currentStage >= 1 ? "text-[#e2e2e2]" : "text-[#8c909f]"}>
-                    Connecting & loading repository source files...
+          {/* Queued State UI */}
+          {isQueued && (
+            <div className="flex flex-col gap-3 py-2 animate-fade-in-up">
+              <div className="p-3.5 rounded-lg bg-[#304671]/30 border border-[#3B82F6]/40 flex items-start gap-3">
+                <Clock className="w-5 h-5 text-[#adc6ff] shrink-0 mt-0.5 animate-pulse" />
+                <div className="flex flex-col gap-1 text-xs">
+                  <span className="font-semibold text-[#adc6ff]">
+                    Another repository is currently indexing
                   </span>
-                </li>
+                  <p className="text-[#a1a1aa] leading-relaxed">
+                    To prevent memory exhaustion on the 512 MB server, jobs run serialized.
+                    Your request is in the queue.
+                  </p>
+                  <div className="mt-1 font-mono text-xs text-[#e2e2e2]">
+                    Queue Position: <span className="text-[#3B82F6] font-bold">{queuePosition}</span>
+                  </div>
+                </div>
+              </div>
 
-                <li className="flex items-center gap-2.5">
-                  {currentStage > 2 ? (
-                    <CheckCircle2 className="w-4 h-4 text-[#10B981] shrink-0" />
-                  ) : currentStage === 2 ? (
-                    <RefreshCw className="w-4 h-4 text-[#3B82F6] animate-spin shrink-0" />
-                  ) : (
-                    <div className="w-4 h-4 rounded-full border border-[#424754] shrink-0"></div>
-                  )}
-                  <span className={currentStage >= 2 ? "text-[#e2e2e2]" : "text-[#8c909f]"}>
-                    Parsing AST functions, classes & dependency graph...
-                  </span>
-                </li>
-
-                <li className="flex items-center gap-2.5">
-                  {currentStage > 3 ? (
-                    <CheckCircle2 className="w-4 h-4 text-[#10B981] shrink-0" />
-                  ) : currentStage === 3 ? (
-                    <RefreshCw className="w-4 h-4 text-[#3B82F6] animate-spin shrink-0" />
-                  ) : (
-                    <div className="w-4 h-4 rounded-full border border-[#424754] shrink-0"></div>
-                  )}
-                  <span className={currentStage >= 3 ? "text-[#e2e2e2]" : "text-[#8c909f]"}>
-                    Generating 384d FastEmbed vector embeddings...
-                  </span>
-                </li>
-
-                <li className="flex items-center gap-2.5">
-                  {currentStage > 4 ? (
-                    <CheckCircle2 className="w-4 h-4 text-[#10B981] shrink-0" />
-                  ) : currentStage === 4 ? (
-                    <RefreshCw className="w-4 h-4 text-[#3B82F6] animate-spin shrink-0" />
-                  ) : (
-                    <div className="w-4 h-4 rounded-full border border-[#424754] shrink-0"></div>
-                  )}
-                  <span className={currentStage >= 4 ? "text-[#e2e2e2]" : "text-[#8c909f]"}>
-                    Building FAISS index & persisting pgvector state...
-                  </span>
-                </li>
-              </ul>
+              {/* Informative Micro-Tip */}
+              <div className="p-3 rounded bg-[#171717] border border-[#2A2A2A] flex items-start gap-2.5 text-xs text-[#8c909f]">
+                <Info className="w-4 h-4 text-[#3B82F6] shrink-0 mt-0.5" />
+                <p className="italic">{EDUCATIONAL_TIPS[tipIndex]}</p>
+              </div>
             </div>
           )}
 
-          {/* Success Statistics Result View */}
+          {/* Running / Indeterminate Loading UI */}
+          {isLoading && !isQueued && (
+            <div className="flex flex-col gap-4 py-2">
+              <div className="flex items-center gap-3 p-3.5 rounded bg-[#171717] border border-[#2A2A2A]">
+                <RefreshCw className="w-5 h-5 text-[#3B82F6] animate-spin shrink-0" />
+                <div className="flex flex-col">
+                  <span className="text-xs font-medium text-[#e2e2e2]">
+                    Building searchable semantic index...
+                  </span>
+                  <span className="text-[11px] text-[#8c909f] mt-0.5">
+                    This can take 1-3 minutes on the free server. Please do not refresh.
+                  </span>
+                </div>
+              </div>
+
+              {/* Helpful Educational Tips Section */}
+              <div className="p-3 rounded bg-[#121414] border border-[#2A2A2A] flex items-start gap-2.5 text-xs">
+                <Sparkles className="w-4 h-4 text-[#adc6ff] shrink-0 mt-0.5" />
+                <div>
+                  <span className="text-[10px] uppercase font-mono font-semibold text-[#8c909f] block mb-0.5">
+                    Why does this take time?
+                  </span>
+                  <p className="text-[#a1a1aa] text-xs leading-relaxed transition-all duration-300">
+                    {EDUCATIONAL_TIPS[tipIndex]}
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Success Result View */}
           {result && (
             <div className="flex flex-col gap-4 animate-fade-in-up">
               <div className="p-3.5 rounded bg-[#10B981]/10 border border-[#10B981]/30 flex items-center gap-2.5 text-xs text-[#10B981] font-mono">
