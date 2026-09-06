@@ -135,11 +135,25 @@ export function setStoredUser(user: UserResponse | null): void {
   }
 }
 
+const PRODUCTION_API_BASE_URL = "https://devmind-backend-pf42.onrender.com";
+
 /**
- * Get API Base URL from NEXT_PUBLIC_API_BASE_URL or default to http://localhost:8000.
+ * Get API Base URL from NEXT_PUBLIC_API_BASE_URL, with automatic production fallback
+ * for browser sessions on deployed domains, or http://localhost:8000 for local development.
  */
 export function getApiBaseUrl(): string {
-  return process.env.NEXT_PUBLIC_API_BASE_URL || DEFAULT_API_BASE_URL;
+  const envUrl = process.env.NEXT_PUBLIC_API_BASE_URL;
+  if (envUrl && envUrl.trim()) {
+    return envUrl.trim().replace(/\/+$/, "");
+  }
+  if (
+    typeof window !== "undefined" &&
+    window.location.hostname &&
+    !["localhost", "127.0.0.1", "::1"].includes(window.location.hostname)
+  ) {
+    return PRODUCTION_API_BASE_URL;
+  }
+  return DEFAULT_API_BASE_URL;
 }
 
 
