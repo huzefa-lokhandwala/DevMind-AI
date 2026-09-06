@@ -21,6 +21,11 @@ class BaseLLMProvider(ABC):
     def model_name(self) -> str:
         """Return configured LLM model identifier."""
 
+    @property
+    def is_configured(self) -> bool:
+        """Return True if provider has credentials configured and is ready for use."""
+        return True
+
     @abstractmethod
     def generate(self, context: PromptContext) -> LLMResponse:
         """Generate response for the provided PromptContext.

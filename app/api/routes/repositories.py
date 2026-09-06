@@ -6,7 +6,8 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
-from app.api.auth import verify_api_key
+from app.api.auth import get_current_user, verify_api_key
+from app.db.models import UserModel
 from app.api.schemas.repository import (
     IndexRepositoryRequest,
     IndexRepositoryResponse,
@@ -39,6 +40,7 @@ def get_rag_service(request: Request) -> RAGService:
 def index_repository(
     payload: IndexRepositoryRequest,
     rag_service: RAGService = Depends(get_rag_service),
+    current_user: UserModel = Depends(get_current_user),
 ) -> IndexRepositoryResponse:
     """Index a local software repository or public GitHub repository for semantic code search.
 
@@ -62,7 +64,7 @@ def index_repository(
 
     # Submit to IndexingCoordinator
     coordinator = rag_service.indexing_coordinator
-    job = coordinator.submit_job(source=source, source_type=source_type)
+    job = coordinator.submit_job(source=source, source_type=source_type, user_id=current_user.id)
 
     if job.status == "QUEUED":
         logger.info("Indexing request for '%s' queued at position %d", source, job.queue_position)
@@ -78,9 +80,15 @@ def index_repository(
 
     try:
         if payload.github_url:
-            result = rag_service.index_github_repository(payload.github_url)
+            try:
+                result = rag_service.index_github_repository(payload.github_url, user_id=current_user.id)
+            except TypeError:
+                result = rag_service.index_github_repository(payload.github_url)
         else:
-            result = rag_service.index_repository(payload.repository_path)  # type: ignore[arg-type]
+            try:
+                result = rag_service.index_repository(payload.repository_path, user_id=current_user.id)  # type: ignore[arg-type]
+            except TypeError:
+                result = rag_service.index_repository(payload.repository_path)  # type: ignore[arg-type]
 
         coordinator.complete_job(job.job_id, result=result)
         return IndexRepositoryResponse(**result, job_id=job.job_id, queue_position=0)
@@ -126,10 +134,11 @@ def index_repository(
 def get_indexing_status(
     job_id: str,
     rag_service: RAGService = Depends(get_rag_service),
+    current_user: UserModel = Depends(get_current_user),
 ) -> JobStatusResponse:
     """Retrieve runtime status and queue position of an indexing job."""
     job = rag_service.indexing_coordinator.get_job_status(job_id)
-    if not job:
+    if not job or (job.user_id is not None and job.user_id != current_user.id):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Indexing job '{job_id}' not found.",

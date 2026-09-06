@@ -104,6 +104,8 @@ class GitHubRepositoryLoader:
             "clone",
             "--depth",
             "1",
+            "--single-branch",
+            "--no-tags",
             sanitized_clone_url,
             str(target_dir),
         ]

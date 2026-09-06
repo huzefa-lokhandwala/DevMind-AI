@@ -9,8 +9,11 @@ from unittest.mock import MagicMock
 from fastapi.testclient import TestClient
 
 from app.api.main import app
+from app.db import crud
+from app.db.database import SessionLocal
 from app.services.indexing_coordinator import IndexingCoordinator
 from app.services.rag_service import RAGService
+from app.utils.security import create_access_token
 
 
 def test_indexing_coordinator_single_job_runs_immediately():
@@ -158,7 +161,25 @@ def test_concurrent_http_indexing_requests_end_to_end():
     """End-to-end HTTP concurrency test: Request A runs, Request B queues and completes in background."""
     client = TestClient(app)
     api_key = "dvm_sk_4f8c2a91e7b63d05c9a142f8e6d73b10c5f294a8d1e63b7f"
-    headers = {"X-API-Key": api_key}
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+    from app.db.database import Base, get_db
+
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(bind=engine)
+    TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    test_db = TestingSessionLocal()
+    user = crud.create_user(test_db, email="test_indexer@example.com", password_hash="dummy_hash")
+    token = create_access_token(user_id=user.id, email=user.email)
+
+    app.dependency_overrides[get_db] = lambda: test_db
+
+    headers = {
+        "X-API-Key": api_key,
+        "Authorization": f"Bearer {token}",
+    }
 
     mock_rag = MagicMock(spec=RAGService)
     coord = IndexingCoordinator(redis_url=None)
@@ -168,7 +189,7 @@ def test_concurrent_http_indexing_requests_end_to_end():
 
     def slow_index(source: str, source_type: str = "local", source_override: str | None = None) -> dict:
         execution_calls.append(source)
-        time.sleep(0.3)
+        time.sleep(0.8)
         return {
             "repository": source,
             "files_loaded": 10,
@@ -184,6 +205,9 @@ def test_concurrent_http_indexing_requests_end_to_end():
 
     res_a: dict = {}
     res_b: dict = {}
+
+    # Warm up app, auth dependency, and database connection pool to avoid first-request initialization jitter
+    client.get("/conversations", headers=headers)
 
     def call_a():
         r = client.post("/repositories/index", json={"repository_path": "/tmp/repo_http_a"}, headers=headers)
@@ -231,3 +255,5 @@ def test_concurrent_http_indexing_requests_end_to_end():
     # Verify both repositories were actually executed
     assert "/tmp/repo_http_a" in execution_calls
     assert "/tmp/repo_http_b" in execution_calls
+
+    app.dependency_overrides.pop(get_db, None)

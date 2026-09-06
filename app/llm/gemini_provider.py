@@ -12,6 +12,7 @@ from google import genai
 from google.genai import types
 
 from app.llm.base_provider import BaseLLMProvider
+from app.llm.exceptions import NonRetryableProviderError, RetryableProviderError
 from app.models.llm_response import LLMResponse
 from app.prompts.context_assembler import PromptContext
 
@@ -72,6 +73,11 @@ class GeminiProvider(BaseLLMProvider):
         """Return configured model name."""
         return self._model_name
 
+    @property
+    def is_configured(self) -> bool:
+        """Return True if Gemini client is initialized or API key is set."""
+        return self._client is not None or bool(self._api_key)
+
     def generate(self, context: PromptContext) -> LLMResponse:
         """Generate LLM response using Google Gemini API.
 
@@ -103,7 +109,7 @@ class GeminiProvider(BaseLLMProvider):
         )
 
         start_time = time.perf_counter()
-        max_retries = 3
+        max_retries = 2
         backoff_sec = 1.0
 
         for attempt in range(1, max_retries + 1):
@@ -116,19 +122,39 @@ class GeminiProvider(BaseLLMProvider):
                 break
             except genai.errors.APIError as exc:
                 code = getattr(exc, "code", None)
-                if code in (503, 429, 500, 502, 504) and attempt < max_retries:
-                    logger.warning(
-                        "Gemini API transient error (%s: %s). Retrying attempt %d/%d after %.1fs...",
-                        code,
-                        exc.message,
-                        attempt,
-                        max_retries,
-                        backoff_sec,
-                    )
+                if code in (503, 429, 500, 502, 504):
+                    if attempt < max_retries:
+                        logger.warning(
+                            "Gemini API transient error (%s: %s). Retrying attempt %d/%d after %.1fs...",
+                            code,
+                            exc.message,
+                            attempt,
+                            max_retries,
+                            backoff_sec,
+                        )
+                        time.sleep(backoff_sec)
+                        backoff_sec *= 2.0
+                    else:
+                        raise RetryableProviderError(
+                            f"Gemini API transient failure ({code}): {exc.message or str(exc)}",
+                            provider="gemini",
+                            status_code=code,
+                        ) from exc
+                else:
+                    raise NonRetryableProviderError(
+                        f"Gemini API non-retryable error ({code}): {exc.message or str(exc)}",
+                        provider="gemini",
+                        status_code=code,
+                    ) from exc
+            except (TimeoutError, ConnectionError) as exc:
+                if attempt < max_retries:
                     time.sleep(backoff_sec)
                     backoff_sec *= 2.0
                 else:
-                    raise
+                    raise RetryableProviderError(
+                        f"Gemini connection failure: {exc}",
+                        provider="gemini",
+                    ) from exc
         latency_ms = (time.perf_counter() - start_time) * 1000.0
 
         answer = response.text or ""

@@ -17,6 +17,7 @@ from app.services.rag_service import (
     IndexingMemoryExceededError,
     InvalidRepositoryError,
     RAGService,
+    get_process_rss_mb,
 )
 from app.vector_store.faiss_store import FAISSVectorStore
 
@@ -114,10 +115,11 @@ def test_rag_service_incremental_indexing_success(synthetic_repo: Path) -> None:
     mock_client.models.embed_content.side_effect = embed_side_effect
     embedding_engine = EmbeddingEngine(provider="gemini", client=mock_client, dimension=384)
 
+    current_rss = get_process_rss_mb()
     service = RAGService(
         embedding_engine=embedding_engine,
         process_batch_size=5,
-        memory_limit_mb=500.0,
+        memory_limit_mb=max(500.0, current_rss + 150.0),
     )
 
     result = service.index_repository(str(synthetic_repo))

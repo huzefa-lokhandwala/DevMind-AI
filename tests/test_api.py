@@ -6,8 +6,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.api.main import app
+from app.db import crud
+from app.db.database import SessionLocal
 from app.embeddings.embedding_engine import EmbeddingEngine
 from app.llm.gemini_provider import GeminiProvider
+from app.utils.security import create_access_token
 from google.genai import types
 
 TEST_API_KEY = "test_devmind_key_abc123"
@@ -16,8 +19,17 @@ TEST_API_KEY = "test_devmind_key_abc123"
 @pytest.fixture
 def client() -> TestClient:
     """Create a TestClient with mocked GeminiProvider, EmbeddingEngine, auth headers, and clean RAG state."""
+    with SessionLocal() as db_session:
+        user = crud.get_or_create_default_dev_user(db_session)
+        token = create_access_token(user_id=user.id, email=user.email)
+
+    auth_headers = {
+        "X-API-Key": TEST_API_KEY,
+        "Authorization": f"Bearer {token}",
+    }
+
     with patch.dict(os.environ, {"DEVMIND_API_KEY": TEST_API_KEY, "DEVMIND_ENV": "development"}):
-        with TestClient(app, headers={"X-API-Key": TEST_API_KEY}) as test_client:
+        with TestClient(app, headers=auth_headers) as test_client:
             mock_client = MagicMock()
             mock_response = MagicMock()
             mock_response.text = (
@@ -48,7 +60,7 @@ def client() -> TestClient:
             service.vector_store = None
             service.retriever = None
             service.indexed_repository_name = None
-            service.embedding_engine = EmbeddingEngine(client=mock_client)
+            service.embedding_engine = EmbeddingEngine(provider="gemini", client=mock_client)
             service.llm_provider = GeminiProvider(client=mock_client)
 
             yield test_client

@@ -351,25 +351,48 @@ export function IndexModal({
             </div>
           )}
 
+          {/* Visual Indexing Pipeline Steps */}
+          {(isLoading || isQueued) && (
+            <div className="p-3 rounded-lg bg-[#111419] border border-[#1e232d] space-y-2">
+              <span className="text-[10px] font-mono text-[#6b7280] uppercase tracking-wider block">
+                Indexing Pipeline
+              </span>
+              <div className="flex items-center justify-between text-[11px] font-mono text-[#9ca3af]">
+                <span className={isLoading ? "text-[#3b82f6] font-semibold" : ""}>1. Discovery</span>
+                <span>→</span>
+                <span className={isLoading ? "text-[#3b82f6] font-semibold" : ""}>2. AST Parsing</span>
+                <span>→</span>
+                <span className={isLoading ? "text-[#3b82f6] font-semibold" : ""}>3. 768d Embeddings</span>
+                <span>→</span>
+                <span className="text-[#6b7280]">4. pgvector</span>
+              </div>
+            </div>
+          )}
+
           {/* Success Result View */}
           {result && (
             <div className="flex flex-col gap-4 animate-fade-in-up">
-              <div className="p-3.5 rounded bg-[#10B981]/10 border border-[#10B981]/30 flex items-center gap-2.5 text-xs text-[#10B981] font-mono">
-                <CheckCircle2 className="w-4 h-4 shrink-0" />
-                <span className="font-semibold">Repository '{result.repository}' successfully indexed!</span>
+              <div className="p-3.5 rounded bg-[#10B981]/10 border border-[#10B981]/30 flex flex-col gap-1 text-xs text-[#10B981] font-mono">
+                <div className="flex items-center gap-2 font-semibold text-sm">
+                  <CheckCircle2 className="w-4 h-4 shrink-0" />
+                  <span>Repository ready</span>
+                </div>
+                <p className="text-[#a1a1aa] font-sans text-xs mt-0.5">
+                  Your codebase <strong className="text-[#f3f4f6]">{result.repository}</strong> is now available to DevMind.
+                </p>
               </div>
 
               <div className="grid grid-cols-3 gap-2 text-center text-xs font-mono">
-                <div className="p-2.5 rounded bg-[#171717] border border-[#2A2A2A]">
-                  <div className="text-[10px] text-[#8c909f] uppercase tracking-wider">Files</div>
-                  <div className="text-base font-bold text-[#e2e2e2] mt-0.5">{result.files_loaded}</div>
+                <div className="p-2.5 rounded bg-[#14171d] border border-[#1e232d]">
+                  <div className="text-[10px] text-[#6b7280] uppercase tracking-wider">Files Loaded</div>
+                  <div className="text-base font-bold text-[#f3f4f6] mt-0.5">{result.files_loaded}</div>
                 </div>
-                <div className="p-2.5 rounded bg-[#171717] border border-[#2A2A2A]">
-                  <div className="text-[10px] text-[#8c909f] uppercase tracking-wider">Chunks</div>
-                  <div className="text-base font-bold text-[#e2e2e2] mt-0.5">{result.chunks_created}</div>
+                <div className="p-2.5 rounded bg-[#14171d] border border-[#1e232d]">
+                  <div className="text-[10px] text-[#6b7280] uppercase tracking-wider">AST Chunks</div>
+                  <div className="text-base font-bold text-[#f3f4f6] mt-0.5">{result.chunks_created}</div>
                 </div>
-                <div className="p-2.5 rounded bg-[#171717] border border-[#2A2A2A]">
-                  <div className="text-[10px] text-[#8c909f] uppercase tracking-wider">Embeddings</div>
+                <div className="p-2.5 rounded bg-[#14171d] border border-[#1e232d]">
+                  <div className="text-[10px] text-[#6b7280] uppercase tracking-wider">Embeddings</div>
                   <div className="text-base font-bold text-[#adc6ff] mt-0.5">{result.embeddings_created}</div>
                 </div>
               </div>
@@ -378,9 +401,9 @@ export function IndexModal({
                 <button
                   type="button"
                   onClick={handleClose}
-                  className="px-4 py-1.5 text-xs font-medium bg-[#3B82F6] hover:bg-[#2563eb] text-[#F5F5F5] rounded transition-colors cursor-pointer"
+                  className="px-4 py-2 text-xs font-medium bg-[#3B82F6] hover:bg-[#2563eb] text-white rounded-lg transition-colors cursor-pointer shadow-sm active:scale-[0.98]"
                 >
-                  Start Querying
+                  Ask your first question
                 </button>
               </div>
             </div>

@@ -10,7 +10,7 @@ from fastapi import FastAPI
 
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import conversations, health, query, repositories
+from app.api.routes import auth, conversations, health, query, repositories
 from app.db.database import Base, engine
 from app.services.rag_service import RAGService
 from app.utils.config import get_cors_origins
@@ -70,6 +70,7 @@ app.add_middleware(
 )
 
 # Register endpoint routers
+app.include_router(auth.router)
 app.include_router(health.router)
 app.include_router(repositories.router)
 app.include_router(query.router)

@@ -9,7 +9,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
-from app.api.auth import verify_api_key
+from app.api.auth import get_current_user, verify_api_key
 from app.api.schemas.conversation import (
     ConversationDetail,
     ConversationSummary,
@@ -19,23 +19,13 @@ from app.api.schemas.conversation import (
 )
 from app.api.schemas.query import SourceDocument
 from app.db import crud
-from app.db.database import SessionLocal
+from app.db.database import SessionLocal, get_db
+from app.db.models import UserModel
+from app.utils.session_validator import validate_session_id
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/conversations", tags=["Conversations"])
-
-
-def get_db():
-    """Database session dependency with guaranteed closure."""
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-
-from app.utils.session_validator import validate_session_id
 
 
 @router.get(
@@ -46,10 +36,11 @@ from app.utils.session_validator import validate_session_id
 )
 def list_conversations(
     session_id: str = Depends(validate_session_id),
+    current_user: UserModel = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> list[ConversationSummary]:
-    """List all recent conversations for the current session in descending updated order."""
-    conv_models = crud.list_conversations(db, session_id=session_id)
+    """List all recent conversations for the authenticated user in descending updated order."""
+    conv_models = crud.list_conversations(db, session_id=session_id, user_id=current_user.id)
     summaries: list[ConversationSummary] = []
     for c in conv_models:
         summaries.append(
@@ -75,14 +66,16 @@ def list_conversations(
 def create_conversation(
     payload: CreateConversationRequest,
     session_id: str = Depends(validate_session_id),
+    current_user: UserModel = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> ConversationDetail:
-    """Create a new conversation for the current session."""
+    """Create a new conversation for the authenticated user."""
     conv = crud.create_conversation(
         db,
         session_id=session_id,
         title=payload.title or "New Chat",
         repository_name=payload.repository_name,
+        user_id=current_user.id,
     )
     return ConversationDetail(
         id=conv.id,
@@ -104,10 +97,13 @@ def create_conversation(
 def get_conversation(
     conversation_id: str,
     session_id: str = Depends(validate_session_id),
+    current_user: UserModel = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> ConversationDetail:
-    """Get full conversation details and ordered message turns, enforcing session isolation."""
-    conv = crud.get_conversation(db, conversation_id=conversation_id, session_id=session_id)
+    """Get full conversation details and ordered message turns, enforcing user isolation."""
+    conv = crud.get_conversation(
+        db, conversation_id=conversation_id, session_id=session_id, user_id=current_user.id
+    )
     if not conv:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -161,13 +157,15 @@ def update_conversation(
     conversation_id: str,
     payload: UpdateConversationRequest,
     session_id: str = Depends(validate_session_id),
+    current_user: UserModel = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> ConversationDetail:
-    """Update conversation title."""
+    """Update conversation title enforcing user ownership."""
     conv = crud.update_conversation_title(
         db,
         conversation_id=conversation_id,
         session_id=session_id,
+        user_id=current_user.id,
         title=payload.title.strip(),
     )
     if not conv:
@@ -175,7 +173,9 @@ def update_conversation(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Conversation not found or access denied.",
         )
-    return get_conversation(conversation_id=conversation_id, session_id=session_id, db=db)
+    return get_conversation(
+        conversation_id=conversation_id, session_id=session_id, current_user=current_user, db=db
+    )
 
 
 @router.delete(
@@ -186,10 +186,13 @@ def update_conversation(
 def delete_conversation(
     conversation_id: str,
     session_id: str = Depends(validate_session_id),
+    current_user: UserModel = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> None:
-    """Delete a conversation, enforcing session isolation."""
-    success = crud.delete_conversation(db, conversation_id=conversation_id, session_id=session_id)
+    """Delete a conversation, enforcing user ownership."""
+    success = crud.delete_conversation(
+        db, conversation_id=conversation_id, session_id=session_id, user_id=current_user.id
+    )
     if not success:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -204,7 +207,8 @@ def delete_conversation(
 )
 def delete_all_conversations(
     session_id: str = Depends(validate_session_id),
+    current_user: UserModel = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> None:
-    """Clear all conversation history for the current session."""
-    crud.delete_all_conversations(db, session_id=session_id)
+    """Clear all conversation history for the authenticated user."""
+    crud.delete_all_conversations(db, session_id=session_id, user_id=current_user.id)

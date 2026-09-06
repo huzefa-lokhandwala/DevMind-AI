@@ -14,5 +14,9 @@ pgvector>=0.2.0
 alembic>=1.13.0
 redis>=5.0.0
 
+# Security & Authentication
+argon2-cffi>=23.1.0
+pyjwt>=2.8.0
+
 # Development and testing
 pytest>=8.0.0

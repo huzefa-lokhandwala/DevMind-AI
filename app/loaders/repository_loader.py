@@ -108,37 +108,57 @@ class RepositoryLoader:
     def iter_file_paths(self) -> list[Path]:
         """Discover and return all eligible, non-ignored source file paths without loading contents.
 
+        Uses directory pruning via os.walk so ignored directories (.git, node_modules, etc.)
+        are never traversed into, dramatically speeding up repository traversal.
+
         Returns:
             Sorted list of eligible file Path objects.
         """
+        import os
         eligible: list[Path] = []
-        for path in sorted(self.repository_path.rglob("*")):
-            if not path.is_file():
-                continue
+        repo_root = str(self.repository_path)
 
-            if self._should_ignore(path):
-                continue
+        for root, dirs, files in os.walk(repo_root, followlinks=False):
+            # In-place directory pruning prevents os.walk from recursing into ignored trees
+            dirs[:] = [d for d in dirs if d not in self.IGNORE_FOLDERS]
 
-            if path.suffix.lower() not in self.SUPPORTED_EXTENSIONS:
-                continue
+            for fname in files:
+                if fname in self.IGNORE_FILES:
+                    continue
 
-            eligible.append(path)
-        return eligible
+                ext = os.path.splitext(fname)[1].lower()
+                if ext not in self.SUPPORTED_EXTENSIONS:
+                    continue
+
+                file_path = Path(root) / fname
+                if file_path.is_symlink():
+                    try:
+                        resolved_path = file_path.resolve()
+                        if not resolved_path.is_relative_to(self.repository_path):
+                            logger.warning("Skipping symlink pointing outside repository root: %s", file_path)
+                            continue
+                    except (OSError, RuntimeError, ValueError):
+                        continue
+
+                eligible.append(file_path)
+
+        return sorted(eligible)
 
     def iter_batches(
-        self, batch_size: int = 5
+        self, batch_size: int = 5, paths: list[Path] | None = None
     ):
         """Yield bounded batches of Document objects loaded from repository files.
 
         Args:
             batch_size: Number of files to load and yield per batch (default: 5).
+            paths: Optional pre-discovered list of Path objects to avoid redundant directory walks.
 
         Yields:
             List of Document objects representing a single processing batch.
         """
-        paths = self.iter_file_paths()
-        for i in range(0, len(paths), max(1, batch_size)):
-            batch_paths = paths[i : i + max(1, batch_size)]
+        file_paths = paths if paths is not None else self.iter_file_paths()
+        for i in range(0, len(file_paths), max(1, batch_size)):
+            batch_paths = file_paths[i : i + max(1, batch_size)]
             batch_documents: list[Document] = []
 
             for path in batch_paths:

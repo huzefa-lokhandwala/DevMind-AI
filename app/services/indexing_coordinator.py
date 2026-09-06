@@ -73,6 +73,7 @@ class IndexingJob:
     source_type: str  # "local" | "github"
     status: str  # "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED"
     queue_position: int = 0
+    user_id: Optional[int] = None
     result: Optional[dict[str, Any]] = None
     error: Optional[str] = None
     created_at: float = field(default_factory=time.time)
@@ -171,7 +172,12 @@ class IndexingCoordinator:
         except Exception:
             return False
 
-    def submit_job(self, source: str, source_type: str) -> IndexingJob:
+    def submit_job(
+        self,
+        source: str,
+        source_type: str,
+        user_id: Optional[int] = None,
+    ) -> IndexingJob:
         """Submit a new repository indexing request.
 
         If no indexing job is currently active (or if active lock is from a dead worker),
@@ -181,6 +187,7 @@ class IndexingCoordinator:
         Args:
             source: Local path or GitHub URL.
             source_type: 'local' or 'github'.
+            user_id: Optional owner user ID.
 
         Returns:
             IndexingJob with updated status and queue position.
@@ -195,6 +202,7 @@ class IndexingCoordinator:
             source_type=source_type,
             status="QUEUED",
             queue_position=0,
+            user_id=user_id,
         )
 
         if self.is_redis_available and self._redis is not None:
@@ -418,7 +426,12 @@ class IndexingCoordinator:
             job.repository_source,
         )
         try:
-            result = self._executor(job.repository_source, job.source_type)
+            import inspect
+            sig = inspect.signature(self._executor)
+            if "user_id" in sig.parameters:
+                result = self._executor(job.repository_source, job.source_type, user_id=job.user_id)
+            else:
+                result = self._executor(job.repository_source, job.source_type)
             self.complete_job(job_id, result=result)
             logger.info("Queued job %s successfully completed by background worker", job_id)
         except Exception as exc:

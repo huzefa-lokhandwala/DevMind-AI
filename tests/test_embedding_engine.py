@@ -242,7 +242,7 @@ def test_engine_gemini_provider_selection(mock_genai_client: MagicMock) -> None:
     engine = EmbeddingEngine(provider="gemini", client=mock_genai_client)
 
     assert engine.provider_name == "gemini"
-    assert engine.model_name == "gemini-embedding-001"
+    assert engine.model_name == "gemini-embedding-2"
     assert engine.embedding_dimension == 768
 
 

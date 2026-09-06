@@ -247,10 +247,10 @@ def test_chunk_null_and_384d_embedding_persistence(db_session):
 
 
 def test_database_default_embedding_dimension_constant():
-    """Verify DEFAULT_EMBEDDING_DIMENSION in models.py is 384."""
+    """Verify DEFAULT_EMBEDDING_DIMENSION in models.py is 768 for Gemini Embedding 2."""
     from app.db.models import DEFAULT_EMBEDDING_DIMENSION, EMBEDDING_DIMENSION
-    assert DEFAULT_EMBEDDING_DIMENSION == 384
-    assert EMBEDDING_DIMENSION == 384
+    assert DEFAULT_EMBEDDING_DIMENSION == 768
+    assert EMBEDDING_DIMENSION == 768
 
 
 def test_crud_save_query_log(db_session):

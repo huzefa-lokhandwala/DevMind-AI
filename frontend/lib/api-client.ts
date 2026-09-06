@@ -11,13 +11,20 @@ import {
   IndexRepositoryRequest,
   IndexRepositoryResponse,
   JobStatusResponse,
+  LoginRequest,
+  MessageResponse,
   QueryRequest,
   QueryResponse,
   ReadinessStatus,
+  RegisterRequest,
+  TokenResponse,
+  UserResponse,
 } from "./types";
 
 const STORAGE_KEY_API_KEY = "devmind_api_key";
 const STORAGE_KEY_SESSION_ID = "devmind_session_id";
+const STORAGE_KEY_AUTH_TOKEN = "devmind_auth_token";
+const STORAGE_KEY_USER = "devmind_user";
 const DEFAULT_API_BASE_URL = "http://localhost:8000";
 
 export class ApiError extends Error {
@@ -31,7 +38,7 @@ export class ApiError extends Error {
 }
 
 export class AuthError extends ApiError {
-  constructor(message = "Your DevMind API key is missing or invalid.") {
+  constructor(message = "Your authentication credentials or API key are missing or invalid.") {
     super(message, 401);
     this.name = "AuthError";
   }
@@ -66,11 +73,75 @@ export class NetworkError extends ApiError {
 }
 
 /**
+ * Read JWT access token safely from browser localStorage.
+ */
+export function getStoredAuthToken(): string {
+  if (typeof window === "undefined") {
+    return "";
+  }
+  return localStorage.getItem(STORAGE_KEY_AUTH_TOKEN) || "";
+}
+
+/**
+ * Persist JWT access token in browser localStorage.
+ */
+export function setStoredAuthToken(token: string): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+  if (!token || !token.trim()) {
+    localStorage.removeItem(STORAGE_KEY_AUTH_TOKEN);
+  } else {
+    localStorage.setItem(STORAGE_KEY_AUTH_TOKEN, token.trim());
+  }
+}
+
+/**
+ * Remove stored JWT access token from browser localStorage.
+ */
+export function clearStoredAuthToken(): void {
+  if (typeof window !== "undefined") {
+    localStorage.removeItem(STORAGE_KEY_AUTH_TOKEN);
+  }
+}
+
+/**
+ * Read cached UserResponse from browser localStorage.
+ */
+export function getStoredUser(): UserResponse | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+  const raw = localStorage.getItem(STORAGE_KEY_USER);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as UserResponse;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Persist cached UserResponse in browser localStorage.
+ */
+export function setStoredUser(user: UserResponse | null): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+  if (!user) {
+    localStorage.removeItem(STORAGE_KEY_USER);
+  } else {
+    localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(user));
+  }
+}
+
+/**
  * Get API Base URL from NEXT_PUBLIC_API_BASE_URL or default to http://localhost:8000.
  */
 export function getApiBaseUrl(): string {
   return process.env.NEXT_PUBLIC_API_BASE_URL || DEFAULT_API_BASE_URL;
 }
+
 
 /**
  * Read API Key safely from browser localStorage.
@@ -148,9 +219,19 @@ async function fetchApi<T>(
   };
 
   if (requiresAuth) {
+    const authToken = getStoredAuthToken();
+    if (authToken) {
+      headers["Authorization"] = `Bearer ${authToken}`;
+    }
     const apiKey = getStoredApiKey();
     if (apiKey) {
       headers["X-API-Key"] = apiKey;
+    }
+  } else {
+    // For non-requiresAuth endpoints, attach Bearer token if present to establish user context if available
+    const authToken = getStoredAuthToken();
+    if (authToken && !headers["Authorization"]) {
+      headers["Authorization"] = `Bearer ${authToken}`;
     }
   }
 
@@ -177,10 +258,21 @@ async function fetchApi<T>(
     }
 
     if (response.status === 401) {
-      throw new AuthError(detailMsg || "Your DevMind API key is missing or invalid.");
+      clearStoredAuthToken();
+      setStoredUser(null);
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent("devmind:auth-unauthorized"));
+      }
+      throw new AuthError(detailMsg || "Your session has expired or credentials are invalid.");
     }
     if (response.status === 400 || response.status === 422) {
       throw new ValidationError(detailMsg || "The request was rejected by the backend. Check the inputs.");
+    }
+    if (response.status === 409) {
+      throw new ApiError(detailMsg || "Resource conflict occurred.", 409);
+    }
+    if (response.status === 404) {
+      throw new ApiError(detailMsg || "Resource not found.", 404);
     }
     if (response.status === 429) {
       throw new RateLimitError(detailMsg || "Rate limit reached. Please wait and try again.");
@@ -195,6 +287,53 @@ async function fetchApi<T>(
       throw err;
     }
     throw new NetworkError("Unable to reach the DevMind backend.");
+  }
+}
+
+/**
+ * Register a new user account with normalized email and password (Public endpoint).
+ */
+export async function registerUser(payload: RegisterRequest): Promise<UserResponse> {
+  return fetchApi<UserResponse>(
+    "/auth/register",
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+    false
+  );
+}
+
+/**
+ * Authenticate credentials and retrieve JWT access token (Public endpoint).
+ */
+export async function loginUser(payload: LoginRequest): Promise<TokenResponse> {
+  return fetchApi<TokenResponse>(
+    "/auth/login",
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+    false
+  );
+}
+
+/**
+ * Fetch profile of currently authenticated user using Bearer token (Protected endpoint).
+ */
+export async function getCurrentUser(): Promise<UserResponse> {
+  return fetchApi<UserResponse>("/auth/me", { method: "GET" }, true);
+}
+
+/**
+ * Log out user, invoke backend acknowledgment, and purge local credentials (Protected endpoint).
+ */
+export async function logoutUser(): Promise<MessageResponse> {
+  try {
+    return await fetchApi<MessageResponse>("/auth/logout", { method: "POST" }, true);
+  } finally {
+    clearStoredAuthToken();
+    setStoredUser(null);
   }
 }
 

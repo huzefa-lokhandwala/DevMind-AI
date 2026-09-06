@@ -19,6 +19,12 @@ export const metadata: Metadata = {
   description: "Code-Aware RAG Platform for Codebase Reasoning and AST Hybrid Retrieval",
 };
 
+export const viewport = {
+  width: "device-width",
+  initialScale: 1,
+  maximumScale: 5,
+};
+
 export default function RootLayout({
   children,
 }: Readonly<{

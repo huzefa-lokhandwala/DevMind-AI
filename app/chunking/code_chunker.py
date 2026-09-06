@@ -79,6 +79,21 @@ class CodeChunker:
     PYTHON_LANGUAGE = "python"
     TS_EXTENSIONS = (".ts", ".tsx", ".js", ".jsx")
 
+    # Precompiled regular expressions for high-performance chunking
+    _CALL_PATTERN = re.compile(r"(?:([a-zA-Z0-9_$]+)\.)?([a-zA-Z0-9_$]+)\s*\(")
+    _STOP_KEYWORDS = frozenset({
+        "if", "for", "while", "switch", "catch", "function", "constructor",
+        "import", "export", "return", "require", "typeof", "await"
+    })
+    _TS_IMPORT_PATTERN = re.compile(
+        r"import\s+(?:\{([^}]+)\}|([a-zA-Z0-9_$]+)|[*]\s+as\s+([a-zA-Z0-9_$]+))\s+from\s+['\"]([^'\"]+)['\"]"
+    )
+    _TS_EXPORT_PATTERN = re.compile(
+        r"export\s+(?:default\s+)?(?:async\s+)?(?:class|function|const|let|var|interface|type)\s+([a-zA-Z0-9_$]+)"
+    )
+    _TS_REEXPORT_PATTERN = re.compile(r"export\s+\{([^}]+)\}")
+    _TS_FUNC_MATCH_PATTERN = re.compile(r"export\s+(?:async\s+)?function\s+([a-zA-Z0-9_]+)")
+
     def chunk_documents(self, documents: list[Document]) -> list[Document]:
         """Convert loaded documents into smaller, code-aware chunks with rich graph metadata."""
         chunks: list[Document] = []
@@ -96,9 +111,6 @@ class CodeChunker:
 
     def _chunk_python_document(self, document: Document) -> list[Document]:
         """Chunk a single Python document by top-level and nested symbols with import and call metadata."""
-        imports, imported_symbols = self._extract_python_imports(document.content)
-        calls = self._extract_function_calls(document.content)
-
         try:
             tree = ast.parse(document.content)
         except SyntaxError as exc:
@@ -107,8 +119,14 @@ class CodeChunker:
                 document.file_path,
                 exc,
             )
+            imports, imported_symbols = self._extract_python_imports(document.content)
+            calls = self._extract_function_calls(document.content)
             fallback = self._whole_file_chunk(document)
             return [replace(fallback, imports=imports, imported_symbols=imported_symbols, function_calls=calls)]
+
+        # Single AST parse reuse
+        imports, imported_symbols = self._extract_python_imports(document.content, tree=tree)
+        calls = self._extract_function_calls(document.content)
 
         visitor = _PythonSymbolVisitor()
         visitor.visit(tree)
@@ -145,7 +163,7 @@ class CodeChunker:
         main_class = exported_symbols[0] if exported_symbols else None
         main_func = None
 
-        func_match = re.search(r"export\s+(?:async\s+)?function\s+([a-zA-Z0-9_]+)", document.content)
+        func_match = self._TS_FUNC_MATCH_PATTERN.search(document.content)
         if func_match:
             main_func = func_match.group(1)
 
@@ -179,13 +197,13 @@ class CodeChunker:
             function_calls=calls,
         )
 
-    def _extract_python_imports(self, content: str) -> tuple[list[str], list[str]]:
+    def _extract_python_imports(self, content: str, tree: ast.AST | None = None) -> tuple[list[str], list[str]]:
         """Extract imported module paths and symbols from Python code using AST."""
         imports: list[str] = []
         symbols: list[str] = []
         try:
-            tree = ast.parse(content)
-            for node in ast.walk(tree):
+            parsed_tree = tree if tree is not None else ast.parse(content)
+            for node in ast.walk(parsed_tree):
                 if isinstance(node, ast.Import):
                     for alias in node.names:
                         imports.append(alias.name)
@@ -204,11 +222,7 @@ class CodeChunker:
         imports: set[str] = set()
         symbols: set[str] = set()
 
-        # Matches: import { A, B } from '@/lib/foo' or import C from 'bar'
-        import_pattern = re.compile(
-            r"import\s+(?:\{([^}]+)\}|([a-zA-Z0-9_$]+)|[*]\s+as\s+([a-zA-Z0-9_$]+))\s+from\s+['\"]([^'\"]+)['\"]"
-        )
-        for match in import_pattern.finditer(content):
+        for match in self._TS_IMPORT_PATTERN.finditer(content):
             named, default_sym, namespace_sym, path = match.groups()
             imports.add(path)
             if named:
@@ -226,14 +240,10 @@ class CodeChunker:
     def _extract_ts_exports(self, content: str) -> list[str]:
         """Extract exported class, function, interface, and const names from TS/JS code."""
         exports: set[str] = set()
-        pattern = re.compile(
-            r"export\s+(?:default\s+)?(?:async\s+)?(?:class|function|const|let|var|interface|type)\s+([a-zA-Z0-9_$]+)"
-        )
-        for match in pattern.finditer(content):
+        for match in self._TS_EXPORT_PATTERN.finditer(content):
             exports.add(match.group(1))
 
-        reexport_pattern = re.compile(r"export\s+\{([^}]+)\}")
-        for match in reexport_pattern.finditer(content):
+        for match in self._TS_REEXPORT_PATTERN.finditer(content):
             for s in match.group(1).split(","):
                 cleaned = s.strip().split(" as ")[-1].strip()
                 if cleaned:
@@ -245,16 +255,9 @@ class CodeChunker:
         """Extract function, method, and constructor invocation symbols from source code."""
         calls: set[str] = set()
 
-        # Matches method/function invocations: VerificationEngine.generateProofHash(), ScoringService.recalculateAndLogScore(), processSubmission()
-        call_pattern = re.compile(r"(?:([a-zA-Z0-9_$]+)\.)?([a-zA-Z0-9_$]+)\s*\(")
-        stop_keywords = {
-            "if", "for", "while", "switch", "catch", "function", "constructor",
-            "import", "export", "return", "require", "typeof", "await"
-        }
-
-        for match in call_pattern.finditer(content):
+        for match in self._CALL_PATTERN.finditer(content):
             obj_name, func_name = match.groups()
-            if func_name and func_name not in stop_keywords:
+            if func_name and func_name not in self._STOP_KEYWORDS:
                 if obj_name:
                     calls.add(f"{obj_name}.{func_name}")
                 else:

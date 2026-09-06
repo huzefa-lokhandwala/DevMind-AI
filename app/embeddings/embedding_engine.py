@@ -269,17 +269,19 @@ class LocalEmbeddingProvider(BaseEmbeddingProvider):
 
 
 class GeminiEmbeddingProvider(BaseEmbeddingProvider):
-    """Remote embedding provider using Google Gemini API (gemini-embedding-001, 768d)."""
+    """Remote embedding provider using Google Gemini API (gemini-embedding-2, 768d)."""
 
-    DEFAULT_MODEL_NAME = "gemini-embedding-001"
+    DEFAULT_MODEL_NAME = "gemini-embedding-2"
     DEFAULT_EMBEDDING_DIMENSION = 768
     DEFAULT_BATCH_SIZE = 50
+    DEFAULT_MAX_RETRIES = 3
 
     def __init__(
         self,
         api_key: str | None = None,
         model_name: str | None = None,
         dimension: int | None = None,
+        batch_size: int | None = None,
         client: Any | None = None,
     ) -> None:
         """Initialize GeminiEmbeddingProvider.
@@ -288,8 +290,10 @@ class GeminiEmbeddingProvider(BaseEmbeddingProvider):
             api_key: Optional Gemini API key. Defaults to environment variable
                 ``GEMINI_API_KEY`` or ``GOOGLE_API_KEY``.
             model_name: Optional Gemini embedding model identifier. Defaults to
-                environment variable ``EMBEDDING_MODEL`` or ``gemini-embedding-001``.
+                environment variable ``GEMINI_EMBEDDING_MODEL``, ``EMBEDDING_MODEL``,
+                or ``gemini-embedding-2``.
             dimension: Optional vector dimensionality (default: 768).
+            batch_size: Optional default embedding batch size (default: 50).
             client: Optional pre-configured ``google.genai.Client`` (useful for testing).
         """
         from google import genai
@@ -301,10 +305,30 @@ class GeminiEmbeddingProvider(BaseEmbeddingProvider):
         )
         self._model_name = (
             model_name
+            or os.getenv("GEMINI_EMBEDDING_MODEL")
             or os.getenv("EMBEDDING_MODEL")
             or self.DEFAULT_MODEL_NAME
         )
-        self._embedding_dimension = dimension or self.DEFAULT_EMBEDDING_DIMENSION
+
+        env_dim = os.getenv("GEMINI_EMBEDDING_DIMENSION") or os.getenv("EMBEDDING_DIMENSION")
+        parsed_dim = self.DEFAULT_EMBEDDING_DIMENSION
+        if env_dim:
+            try:
+                parsed_dim = int(env_dim.strip())
+            except (ValueError, TypeError):
+                pass
+        self._embedding_dimension = dimension or parsed_dim
+
+        env_batch = os.getenv("GEMINI_EMBEDDING_BATCH_SIZE") or os.getenv("EMBEDDING_BATCH_SIZE")
+        parsed_batch = self.DEFAULT_BATCH_SIZE
+        if env_batch:
+            try:
+                b = int(env_batch.strip())
+                if b > 0:
+                    parsed_batch = b
+            except (ValueError, TypeError):
+                pass
+        self._batch_size = batch_size if (batch_size is not None and batch_size > 0) else parsed_batch
 
         if client is not None:
             self._client = client
@@ -318,9 +342,10 @@ class GeminiEmbeddingProvider(BaseEmbeddingProvider):
             self._client = None
 
         logger.info(
-            "GeminiEmbeddingProvider initialized (model=%s, dimension=%d)",
+            "GeminiEmbeddingProvider initialized (model=%s, dimension=%d, batch_size=%d)",
             self._model_name,
             self._embedding_dimension,
+            self._batch_size,
         )
 
     @property
@@ -331,12 +356,27 @@ class GeminiEmbeddingProvider(BaseEmbeddingProvider):
     def embedding_dimension(self) -> int:
         return self._embedding_dimension
 
+    @property
+    def batch_size(self) -> int:
+        return self._batch_size
+
+    def _sanitize_error_message(self, message: str) -> str:
+        """Strip sensitive credentials and keys from error messages before logging or re-raising."""
+        sanitized = message
+        if self._api_key and len(self._api_key) > 4:
+            sanitized = sanitized.replace(self._api_key, "[REDACTED_API_KEY]")
+        # Strip generic bearer tokens or key parameters
+        import re
+        sanitized = re.sub(r"key=[A-Za-z0-9_\-]+", "key=[REDACTED]", sanitized)
+        sanitized = re.sub(r"Bearer\s+[A-Za-z0-9_\-\.]+", "Bearer [REDACTED]", sanitized)
+        return sanitized
+
     def _call_embed_api_with_retry(
         self,
         contents: str | list[str],
         task_type: str,
-        max_retries: int = 3,
-        backoff_sec: float = 1.0,
+        max_retries: int | None = None,
+        backoff_sec: float = 0.5,
     ) -> Any:
         """Invoke Gemini embed_content API with retry backoff for transient errors."""
         from google import genai
@@ -347,64 +387,97 @@ class GeminiEmbeddingProvider(BaseEmbeddingProvider):
                 "Gemini API key missing. Please set GEMINI_API_KEY or GOOGLE_API_KEY environment variable."
             )
 
+        retries = max_retries if max_retries is not None else self.DEFAULT_MAX_RETRIES
         config = types.EmbedContentConfig(
             task_type=task_type,
             output_dimensionality=self._embedding_dimension,
         )
 
-        for attempt in range(1, max_retries + 1):
+        if isinstance(contents, list):
+            contents_payload = [
+                item if hasattr(item, "parts") else types.Content(parts=[types.Part.from_text(text=str(item))])
+                for item in contents
+            ]
+        else:
+            contents_payload = contents
+
+        for attempt in range(1, retries + 1):
             try:
                 response = self._client.models.embed_content(
                     model=self._model_name,
-                    contents=contents,
+                    contents=contents_payload,
                     config=config,
                 )
                 return response
             except genai.errors.APIError as exc:
                 code = getattr(exc, "code", None)
-                if code in (503, 429, 500, 502, 504) and attempt < max_retries:
+                safe_err_msg = self._sanitize_error_message(str(exc))
+
+                # Authentication failures: do not retry
+                if code in (401, 403):
+                    logger.error("Gemini Embedding API authentication failure (code=%s): %s", code, safe_err_msg)
+                    raise PermissionError(
+                        f"Gemini API authentication failed (HTTP {code}). Please check your GEMINI_API_KEY."
+                    ) from None
+
+                # Transient errors: retry with exponential backoff
+                if code in (429, 500, 502, 503, 504) and attempt < retries:
                     logger.warning(
-                        "Gemini Embedding API transient error (%s). Retrying attempt %d/%d after %.1fs...",
+                        "Gemini Embedding API transient error (code=%s). Retrying attempt %d/%d after %.1fs...",
                         code,
                         attempt,
-                        max_retries,
+                        retries,
                         backoff_sec,
                     )
                     time.sleep(backoff_sec)
                     backoff_sec *= 2.0
                 else:
-                    logger.error("Gemini Embedding API error: %s", exc)
-                    raise
+                    logger.error("Gemini Embedding API call failed (code=%s): %s", code, safe_err_msg)
+                    raise RuntimeError(
+                        f"Gemini Embedding API failed with status code {code}."
+                    ) from None
             except Exception as exc:
-                if attempt < max_retries:
+                exc_name = type(exc).__name__
+                safe_err_msg = self._sanitize_error_message(str(exc))
+
+                # Network timeouts / connection drops
+                is_transient = "timeout" in exc_name.lower() or "connection" in exc_name.lower() or "timeout" in safe_err_msg.lower()
+                if is_transient and attempt < retries:
                     logger.warning(
-                        "Unexpected error calling Gemini Embedding API (%s). Retrying %d/%d...",
-                        type(exc).__name__,
+                        "Gemini Embedding API transient network error (%s). Retrying %d/%d after %.1fs...",
+                        exc_name,
                         attempt,
-                        max_retries,
+                        retries,
+                        backoff_sec,
                     )
                     time.sleep(backoff_sec)
                     backoff_sec *= 2.0
                 else:
-                    logger.error("Gemini Embedding API request failed: %s", exc)
-                    raise
+                    logger.error("Gemini Embedding API unexpected error (%s): %s", exc_name, safe_err_msg)
+                    raise RuntimeError(
+                        f"Gemini Embedding API error ({exc_name}): {safe_err_msg}"
+                    ) from None
 
         raise RuntimeError("Exceeded maximum retries calling Gemini Embedding API.")
 
     def embed_documents(
         self, documents: Sequence[Document], batch_size: int | None = None
     ) -> list[Document]:
-        """Attach vector embeddings to each document using Gemini API."""
+        """Attach dense vector embeddings to each document using Gemini API.
+
+        Validates output dimensionality (768), count, and ordering per batch.
+        """
         if not documents:
             logger.info("No documents to embed")
             return []
 
-        actual_batch_size = batch_size or self.DEFAULT_BATCH_SIZE
+        actual_batch_size = batch_size or self._batch_size
         texts = [document.content for document in documents]
         logger.info(
-            "Generating Gemini embeddings for %d document(s) in batches of %d",
+            "Generating Gemini embeddings for %d document(s) in batches of %d (task_type=RETRIEVAL_DOCUMENT, dim=%d)",
             len(documents),
             actual_batch_size,
+            self._embedding_dimension,
         )
 
         all_vectors: list[list[float]] = []
@@ -414,16 +487,33 @@ class GeminiEmbeddingProvider(BaseEmbeddingProvider):
                 contents=batch_texts,
                 task_type="RETRIEVAL_DOCUMENT",
             )
-            if not response.embeddings:
+            if not response or not response.embeddings:
                 raise RuntimeError(
                     f"Gemini Embedding API returned no embeddings for batch [{i}:{i+len(batch_texts)}]"
                 )
-            for emb in response.embeddings:
-                all_vectors.append(list(emb.values))
+
+            if len(response.embeddings) != len(batch_texts):
+                raise RuntimeError(
+                    f"Gemini Embedding API returned {len(response.embeddings)} embeddings for "
+                    f"{len(batch_texts)} input texts in batch [{i}:{i+len(batch_texts)}]"
+                )
+
+            for item_idx, emb in enumerate(response.embeddings):
+                if not hasattr(emb, "values") or emb.values is None:
+                    raise RuntimeError(
+                        f"Gemini Embedding API returned malformed embedding object at index {i + item_idx}"
+                    )
+                vec = [float(v) for v in emb.values]
+                if len(vec) != self._embedding_dimension:
+                    raise ValueError(
+                        f"Returned embedding dimension ({len(vec)}) does not match "
+                        f"expected dimension ({self._embedding_dimension}) at index {i + item_idx}."
+                    )
+                all_vectors.append(vec)
 
         if len(all_vectors) != len(documents):
             raise RuntimeError(
-                f"Embedding count mismatch: expected {len(documents)}, got {len(all_vectors)}"
+                f"Total embedding count mismatch: expected {len(documents)}, got {len(all_vectors)}"
             )
 
         embedded_documents: list[Document] = []
@@ -438,19 +528,36 @@ class GeminiEmbeddingProvider(BaseEmbeddingProvider):
         return embedded_documents
 
     def embed_query(self, query: str) -> list[float]:
-        """Generate a dense vector embedding for a single query using Gemini API."""
+        """Generate a dense vector embedding for a single query using Gemini API.
+
+        Uses task_type=RETRIEVAL_QUERY and verifies output dimension.
+        """
         if not query or not query.strip():
             raise ValueError("Query string must not be empty or whitespace-only.")
 
-        logger.info("Generating Gemini embedding for query: '%s'", query)
+        logger.info(
+            "Generating Gemini embedding for query: '%s' (task_type=RETRIEVAL_QUERY, dim=%d)",
+            query[:60],
+            self._embedding_dimension,
+        )
         response = self._call_embed_api_with_retry(
             contents=query.strip(),
             task_type="RETRIEVAL_QUERY",
         )
-        if not response.embeddings:
+        if not response or not response.embeddings:
             raise RuntimeError("Gemini Embedding API returned no embeddings for query.")
 
-        return list(response.embeddings[0].values)
+        emb = response.embeddings[0]
+        if not hasattr(emb, "values") or emb.values is None:
+            raise RuntimeError("Gemini Embedding API returned malformed embedding values for query.")
+
+        vector: list[float] = [float(v) for v in emb.values]
+        if len(vector) != self._embedding_dimension:
+            raise ValueError(
+                f"Generated query embedding dimension ({len(vector)}) does not match "
+                f"expected dimension ({self._embedding_dimension})."
+            )
+        return vector
 
 
 class EmbeddingEngine:
@@ -511,6 +618,7 @@ class EmbeddingEngine:
                 api_key=api_key,
                 model_name=model_name,
                 dimension=dimension,
+                batch_size=batch_size,
                 client=client,
             )
         else:

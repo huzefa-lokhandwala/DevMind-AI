@@ -7,6 +7,7 @@ from typing import List, Optional
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
+    Boolean,
     DateTime,
     Float,
     ForeignKey,
@@ -21,21 +22,21 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 import os
 from app.db.database import Base
 
-DEFAULT_EMBEDDING_DIMENSION = 384
-_env_dim = os.getenv("EMBEDDING_DIMENSION")
+DEFAULT_EMBEDDING_DIMENSION = 768
+_env_dim = os.getenv("GEMINI_EMBEDDING_DIMENSION") or os.getenv("EMBEDDING_DIMENSION")
 EMBEDDING_DIMENSION = int(_env_dim) if _env_dim and _env_dim.isdigit() else DEFAULT_EMBEDDING_DIMENSION
 
 
-class RepositoryModel(Base):
-    """SQLAlchemy model representing an ingested codebase repository."""
+class UserModel(Base):
+    """SQLAlchemy model representing a registered user account."""
 
-    __tablename__ = "repositories"
+    __tablename__ = "users"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
-    source: Mapped[str] = mapped_column(String(1024), nullable=False)
-    source_type: Mapped[str] = mapped_column(String(50), nullable=False, default="local")
-    status: Mapped[str] = mapped_column(String(50), nullable=False, default="indexed")
+    email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    full_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -46,6 +47,41 @@ class RepositoryModel(Base):
         nullable=False,
     )
 
+    repositories: Mapped[List[RepositoryModel]] = relationship(
+        "RepositoryModel", back_populates="user", cascade="all, delete-orphan"
+    )
+    conversations: Mapped[List[ConversationModel]] = relationship(
+        "ConversationModel", back_populates="user", cascade="all, delete-orphan"
+    )
+
+
+class RepositoryModel(Base):
+    """SQLAlchemy model representing an ingested codebase repository."""
+
+    __tablename__ = "repositories"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    source: Mapped[str] = mapped_column(String(1024), nullable=False)
+    source_type: Mapped[str] = mapped_column(String(50), nullable=False, default="local")
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="indexed")
+    embedding_provider: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    embedding_model: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    embedding_dimension: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    user: Mapped[Optional[UserModel]] = relationship("UserModel", back_populates="repositories")
     files: Mapped[List[FileModel]] = relationship(
         "FileModel", back_populates="repository", cascade="all, delete-orphan"
     )
@@ -136,6 +172,9 @@ class ConversationModel(Base):
     __tablename__ = "conversations"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    user_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     session_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False, default="New Chat")
     repository_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
@@ -149,6 +188,7 @@ class ConversationModel(Base):
         nullable=False,
     )
 
+    user: Mapped[Optional[UserModel]] = relationship("UserModel", back_populates="conversations")
     messages: Mapped[List[MessageModel]] = relationship(
         "MessageModel",
         back_populates="conversation",

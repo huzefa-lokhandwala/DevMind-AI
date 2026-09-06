@@ -24,6 +24,10 @@ class QueryRequest(BaseModel):
         default=None,
         description="Optional conversation ID to append message turns to persistent chat history.",
     )
+    repository_name: Optional[str] = Field(
+        default=None,
+        description="Optional target repository name to query.",
+    )
 
     @field_validator("query")
     @classmethod

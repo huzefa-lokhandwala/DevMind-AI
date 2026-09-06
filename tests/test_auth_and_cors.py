@@ -9,15 +9,15 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.api.main import app
+from app.db import crud
+from app.db.database import SessionLocal, get_db
+from app.utils.security import create_access_token
 
 
 @pytest.fixture
 def client():
     """FastAPI TestClient fixture."""
     return TestClient(app)
-
-
-from app.db.database import get_db
 
 
 def test_health_endpoints_remain_publicly_accessible_without_api_key(client) -> None:
@@ -73,9 +73,16 @@ def test_protected_endpoint_with_correct_api_key_succeeds(client) -> None:
         }
         app.state.rag_service = mock_service
 
+        with SessionLocal() as db_session:
+            user = crud.get_or_create_default_dev_user(db_session)
+            token = create_access_token(user_id=user.id, email=user.email)
+
         res = client.post(
             "/query",
-            headers={"X-API-Key": "secret_test_key_123"},
+            headers={
+                "X-API-Key": "secret_test_key_123",
+                "Authorization": f"Bearer {token}",
+            },
             json={"query": "Where is main?"},
         )
         assert res.status_code == 200

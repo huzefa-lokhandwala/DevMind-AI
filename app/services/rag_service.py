@@ -23,7 +23,7 @@ from app.db.crud import (
 )
 from app.db.database import SessionLocal
 from app.embeddings.embedding_engine import EmbeddingEngine
-from app.llm.gemini_provider import GeminiProvider
+from app.llm import BaseLLMProvider, create_fallback_llm_provider
 from app.loaders import GitHubLoaderError, GitHubRepositoryLoader, RepositoryLoader
 from app.models.document import Document
 from app.prompts.context_assembler import ContextAssembler, PromptContext
@@ -38,6 +38,10 @@ logger = logging.getLogger(__name__)
 
 class RepositoryNotIndexedError(Exception):
     """Raised when query is invoked before any repository has been indexed."""
+
+
+class RepositoryNotFoundError(Exception):
+    """Raised when a requested repository is not found or is inaccessible to the authenticated user."""
 
 
 class InvalidRepositoryError(Exception):
@@ -103,13 +107,13 @@ class RAGService:
     Maintains active FAISS vector store state for semantic code queries and persists database metadata.
     """
 
-    DEFAULT_PROCESS_BATCH_SIZE: int = 5
+    DEFAULT_PROCESS_BATCH_SIZE: int = 10
     DEFAULT_MEMORY_LIMIT_MB: float = 600.0 if sys.platform == "darwin" else 400.0
 
     def __init__(
         self,
         embedding_engine: EmbeddingEngine | None = None,
-        llm_provider: GeminiProvider | None = None,
+        llm_provider: BaseLLMProvider | None = None,
         db_session: Session | None = None,
         process_batch_size: int | None = None,
         memory_limit_mb: float | None = None,
@@ -120,7 +124,7 @@ class RAGService:
         import threading
         logger.info("Initializing RAGService lifecycle...")
         self.embedding_engine = embedding_engine or EmbeddingEngine()
-        self.llm_provider = llm_provider or GeminiProvider()
+        self.llm_provider = llm_provider or create_fallback_llm_provider()
         self.context_assembler = ContextAssembler()
         self.chunker = CodeChunker()
         self.db_session = db_session
@@ -156,7 +160,7 @@ class RAGService:
 
         # Runtime indexed state
         self.vector_store: FAISSVectorStore | None = None
-        self.retriever: Retriever | None = None
+        self.retriever: Retriever = Retriever(self.embedding_engine)
         self.indexed_repository_name: str | None = None
 
     @property
@@ -164,7 +168,6 @@ class RAGService:
         """Return True if a repository is currently indexed into vector store."""
         return (
             self.vector_store is not None
-            and self.retriever is not None
             and self.vector_store.total_documents > 0
         )
 
@@ -213,6 +216,9 @@ class RAGService:
                     source=source,
                     source_type=source_type,
                     status="indexed",
+                    embedding_provider=self.embedding_engine.provider_name,
+                    embedding_model=self.embedding_engine.model_name,
+                    embedding_dimension=self.embedding_engine.embedding_dimension,
                 )
                 save_repository_documents(
                     db=db,
@@ -233,13 +239,15 @@ class RAGService:
         provider: str | None,
         model: str | None,
         latency_ms: float | None,
+        repository_id: int | None = None,
+        db_session: Session | None = None,
     ) -> None:
         """Helper to save query log to PostgreSQL."""
         try:
-            db, auto_close = self._get_db_session()
+            db, auto_close = (db_session, False) if db_session is not None else self._get_db_session()
             try:
-                repo_id: int | None = None
-                if self.indexed_repository_name:
+                repo_id = repository_id
+                if repo_id is None and self.indexed_repository_name:
                     repo_model = get_repository_by_name(db, self.indexed_repository_name)
                     if repo_model:
                         repo_id = repo_model.id
@@ -261,7 +269,11 @@ class RAGService:
             logger.warning("Database persistence failed for query history: %s", exc)
 
     def index_repository(
-        self, repository_path: str, source_type: str = "local", source_override: str | None = None
+        self,
+        repository_path: str,
+        source_type: str = "local",
+        source_override: str | None = None,
+        user_id: int | None = None,
     ) -> dict[str, Any]:
         """Index a local repository incrementally for RAG retrieval and persist to database.
 
@@ -272,6 +284,7 @@ class RAGService:
             repository_path: Path to the target local repository folder.
             source_type: Metadata classification ('local' or 'github').
             source_override: Optional source location string if different from repository_path.
+            user_id: Optional ID of the authenticated user who owns this repository.
 
         Returns:
             Dictionary payload describing indexing statistics.
@@ -325,73 +338,107 @@ class RAGService:
             )
 
             from app.graph.code_graph import CodeGraph
-            vector_store = FAISSVectorStore()
+            vector_store = FAISSVectorStore(dimension=self.embedding_engine.embedding_dimension)
             code_graph = CodeGraph()
 
             total_files_loaded = 0
             total_chunks_created = 0
             total_embeddings_created = 0
 
-            # Stream processing in bounded batches
-            batch_num = 0
-            for file_batch in loader.iter_batches(batch_size=self.process_batch_size):
-                batch_num += 1
-                self._check_memory_limit(f"batch {batch_num} start")
+            # Obtain persistent database session across batches to avoid connection churn
+            db, auto_close = self._get_db_session()
+            repo_model = None
+            try:
+                try:
+                    repo_model = create_or_update_repository(
+                        db=db,
+                        name=repo_name,
+                        source=source_loc,
+                        source_type=source_type,
+                        status="indexing",
+                        embedding_provider=self.embedding_engine.provider_name,
+                        embedding_model=self.embedding_engine.model_name,
+                        embedding_dimension=self.embedding_engine.embedding_dimension,
+                        user_id=user_id,
+                    )
+                except Exception as exc:
+                    logger.warning("Failed initializing repository record in database: %s", exc)
 
-                batch_files_count = len(file_batch)
-                total_files_loaded += batch_files_count
+                # Stream processing in bounded batches without re-traversing directory
+                batch_num = 0
+                for file_batch in loader.iter_batches(batch_size=self.process_batch_size, paths=eligible_paths):
+                    batch_num += 1
+                    self._check_memory_limit(f"batch {batch_num} start")
 
-                # AST chunking for this batch
-                batch_chunks = self.chunker.chunk_documents(file_batch)
-                batch_chunks_count = len(batch_chunks)
-                total_chunks_created += batch_chunks_count
+                    batch_files_count = len(file_batch)
+                    total_files_loaded += batch_files_count
 
-                # Release file batch contents immediately
-                del file_batch
+                    # AST chunking for this batch
+                    batch_chunks = self.chunker.chunk_documents(file_batch)
+                    batch_chunks_count = len(batch_chunks)
+                    total_chunks_created += batch_chunks_count
 
-                # Embed chunks for this batch (batch_size=1)
-                batch_embedded = self.embedding_engine.embed_documents(batch_chunks)
-                batch_embeddings_count = len(batch_embedded)
-                total_embeddings_created += batch_embeddings_count
+                    # Release file batch contents immediately
+                    del file_batch
 
-                # Check memory after embedding
-                self._check_memory_limit(f"batch {batch_num} post-embedding")
+                    # Embed chunks for this batch (batch_size=1)
+                    batch_embedded = self.embedding_engine.embed_documents(batch_chunks)
+                    batch_embeddings_count = len(batch_embedded)
+                    total_embeddings_created += batch_embeddings_count
 
-                # Incrementally add to FAISS index
-                vector_store.add_documents(batch_embedded)
+                    # Check memory after embedding
+                    self._check_memory_limit(f"batch {batch_num} post-embedding")
 
-                # Incrementally add to CodeGraph
-                code_graph.add_documents(batch_embedded)
+                    # Incrementally add to FAISS index
+                    vector_store.add_documents(batch_embedded)
 
-                # Incrementally persist to database
-                self._persist_indexed_repository(
-                    repository_name=repo_name,
-                    source=source_loc,
-                    source_type=source_type,
-                    embedded_chunks=batch_embedded,
-                )
+                    # Incrementally add to CodeGraph
+                    code_graph.add_documents(batch_embedded)
 
-                # Release batch objects and collect garbage
-                del batch_chunks
-                del batch_embedded
-                gc.collect()
+                    # Incrementally persist to database reusing existing session
+                    if repo_model is not None:
+                        try:
+                            save_repository_documents(
+                                db=db,
+                                repository_id=repo_model.id,
+                                documents=batch_embedded,
+                                commit=True,
+                            )
+                        except Exception as exc:
+                            logger.warning("Database persistence failed for batch %d: %s", batch_num, exc)
 
-                # Check memory after persistence & GC
-                self._check_memory_limit(f"batch {batch_num} post-persistence")
+                    # Release batch objects and collect garbage
+                    del batch_chunks
+                    del batch_embedded
+                    gc.collect()
 
-                logger.info(
-                    "[TELEMETRY stage 9] Batch %d complete: processed %d files, %d chunks (Cumulative: %d/%d files, %d chunks, RSS=%.2f MB)",
-                    batch_num,
-                    batch_files_count,
-                    batch_chunks_count,
-                    total_files_loaded,
-                    total_discovered,
-                    total_chunks_created,
-                    get_process_rss_mb(),
-                )
+                    # Check memory after persistence & GC
+                    self._check_memory_limit(f"batch {batch_num} post-persistence")
 
-            if total_files_loaded == 0:
-                raise InvalidRepositoryError(f"No supported indexable source files found in {repository_path}")
+                    logger.info(
+                        "[TELEMETRY stage 9] Batch %d complete: processed %d files, %d chunks (Cumulative: %d/%d files, %d chunks, RSS=%.2f MB)",
+                        batch_num,
+                        batch_files_count,
+                        batch_chunks_count,
+                        total_files_loaded,
+                        total_discovered,
+                        total_chunks_created,
+                        get_process_rss_mb(),
+                    )
+
+                if total_files_loaded == 0:
+                    raise InvalidRepositoryError(f"No supported indexable source files found in {repository_path}")
+
+                # Finalize repository status in database
+                if repo_model is not None:
+                    try:
+                        repo_model.status = "indexed"
+                        db.commit()
+                    except Exception as exc:
+                        logger.warning("Failed updating repository final status to indexed: %s", exc)
+            finally:
+                if auto_close:
+                    db.close()
 
             retriever = Retriever(self.embedding_engine, vector_store, code_graph=code_graph)
 
@@ -420,11 +467,12 @@ class RAGService:
         finally:
             self._indexing_lock.release()
 
-    def index_github_repository(self, github_url: str) -> dict[str, Any]:
+    def index_github_repository(self, github_url: str, user_id: int | None = None) -> dict[str, Any]:
         """Index a public GitHub repository by URL and persist to database.
 
         Args:
             github_url: Validated HTTPS URL for a public GitHub repository.
+            user_id: Optional ID of the authenticated user who owns this repository.
 
         Returns:
             Dictionary payload matching IndexRepositoryResponse schema.
@@ -443,14 +491,16 @@ class RAGService:
         logger.info("[TELEMETRY stage 4] Repository clone complete: %s (RSS=%.2f MB)", local_repo_path, get_process_rss_mb())
 
         return self.index_repository(
-            str(local_repo_path), source_type="github", source_override=github_url
+            str(local_repo_path), source_type="github", source_override=github_url, user_id=user_id
         )
 
-    def _execute_indexing_job(self, source: str, source_type: str) -> dict[str, Any]:
+    def _execute_indexing_job(
+        self, source: str, source_type: str, user_id: int | None = None
+    ) -> dict[str, Any]:
         """Internal callback invoked by IndexingCoordinator worker to execute queued indexing."""
         if source_type == "github":
-            return self.index_github_repository(source)
-        return self.index_repository(source)
+            return self.index_github_repository(source, user_id=user_id)
+        return self.index_repository(source, user_id=user_id)
 
     def query(
         self,
@@ -458,6 +508,9 @@ class RAGService:
         top_k: int = 5,
         session_id: str | None = None,
         conversation_id: str | None = None,
+        user_id: int | None = None,
+        repository_name: str | None = None,
+        db_session: Session | None = None,
     ) -> dict[str, Any]:
         """Query the system using intent routing (GENERAL, REPOSITORY, MIXED).
 
@@ -466,20 +519,77 @@ class RAGService:
             top_k: Number of relevant context chunks to retrieve.
             session_id: Optional anonymous browser session identifier.
             conversation_id: Optional conversation identifier for message persistence.
+            user_id: Optional ID of the authenticated user making the query.
+            repository_name: Optional target repository name to query.
+            db_session: Optional active database session.
 
         Returns:
             Dictionary payload matching QueryResponse schema.
 
         Raises:
-            RepositoryNotIndexedError: If repository question is asked before indexing.
+            RepositoryNotIndexedError: If repository question is asked before indexing or access denied.
             ValueError: If query is empty or whitespace-only.
         """
         query_clean = query_text.strip()
         if not query_clean:
             raise ValueError("Query string must not be empty or whitespace-only.")
 
+        # Resolve target repository name
+        target_repo_name = repository_name
+        if not target_repo_name and conversation_id:
+            db_conv, close_conv = (db_session, False) if db_session is not None else self._get_db_session()
+            try:
+                conv = get_conversation(
+                    db_conv, conversation_id=conversation_id, session_id=session_id, user_id=user_id
+                )
+                if conv and conv.repository_name:
+                    target_repo_name = conv.repository_name
+            finally:
+                if close_conv:
+                    db_conv.close()
+
+        # Fallback to self.indexed_repository_name ONLY IF:
+        # 1. Unauthenticated / development mode (user_id is None), OR
+        # 2. Authenticated user (user_id is not None) explicitly OWNS self.indexed_repository_name.
+        # An authenticated user must NEVER inherit a repository belonging to another user.
+        if not target_repo_name and self.indexed_repository_name:
+            if user_id is None:
+                target_repo_name = self.indexed_repository_name
+            else:
+                db_fb, close_fb = (db_session, False) if db_session is not None else self._get_db_session()
+                try:
+                    owned_repo = get_repository_by_name(db_fb, self.indexed_repository_name, user_id=user_id)
+                    if owned_repo is not None:
+                        target_repo_name = self.indexed_repository_name
+                finally:
+                    if close_fb:
+                        db_fb.close()
+
+        # Enforce repository ownership isolation early before routing or retrieval
+        if target_repo_name:
+            db_check, auto_close_check = (db_session, False) if db_session is not None else self._get_db_session()
+            try:
+                repo_check = get_repository_by_name(db_check, target_repo_name, user_id=user_id)
+                if not repo_check:
+                    if user_id is not None:
+                        # Resource-safe 404: Do not leak existence or owner of unowned repositories
+                        raise RepositoryNotFoundError(
+                            f"Repository '{target_repo_name}' not found."
+                        )
+                    elif self.vector_store is None or self.indexed_repository_name != target_repo_name:
+                        # Resource-safe 404: Do not leak existence or owner of unowned repositories
+                        raise RepositoryNotFoundError(
+                            f"Repository '{target_repo_name}' not found."
+                        )
+            finally:
+                if auto_close_check:
+                    db_check.close()
+
         # Classify intent deterministically without extra LLM overhead
         intent = classify_intent(query_clean)
+        # If user explicitly or contextually targeted a repository, ensure repository retrieval is performed
+        if target_repo_name and intent == QueryIntent.GENERAL:
+            intent = QueryIntent.REPOSITORY
         logger.info("Query '%s' classified as intent: %s", query_clean[:60], intent.value)
 
         t0 = time.perf_counter()
@@ -494,18 +604,103 @@ class RAGService:
             retrieval_ms = 0.0
             assembly_ms = round((t1 - t0) * 1000, 2)
             generation_ms = round((t2 - t1) * 1000, 2)
+            repo_model = None
         else:
             # REPOSITORY or MIXED intent: Requires indexed repository
-            if not self.is_indexed or self.retriever is None:
+            if not target_repo_name:
+                if not self.is_indexed:
+                    raise RepositoryNotIndexedError(
+                        "No repository has been indexed yet. Call /repositories/index first."
+                    )
+                if user_id is not None:
+                    raise RepositoryNotIndexedError(
+                        "Repository context is required for authenticated repository queries. "
+                        "Specify 'repository_name' or query within a repository conversation."
+                    )
                 raise RepositoryNotIndexedError(
                     "No repository has been indexed yet. Call /repositories/index first."
                 )
 
-            t0_retr = time.perf_counter()
-            search_results = self.retriever.retrieve(
-                query_clean, k=top_k, repository_name=self.indexed_repository_name
-            )
-            t1_retr = time.perf_counter()
+            # Resolve repository model and verify ownership + metadata
+            repo_model = None
+            db_query, auto_close_query = (db_session, False) if db_session is not None else self._get_db_session()
+            try:
+                from sqlalchemy import select
+                from app.db.models import ChunkModel, FileModel
+
+                if target_repo_name:
+                    repo_model = get_repository_by_name(db_query, target_repo_name, user_id=user_id)
+                    if not repo_model:
+                        if user_id is not None:
+                            # Resource-safe 404: Do not leak existence or owner of unowned repositories
+                            raise RepositoryNotFoundError(
+                                f"Repository '{target_repo_name}' not found."
+                            )
+                        # Fallback only for in-memory tests without DB persistence where vector_store is loaded
+                        elif self.vector_store is not None and self.indexed_repository_name == target_repo_name:
+                            repo_model = None
+                        else:
+                            # Resource-safe 404: Do not leak existence or owner of unowned repositories
+                            raise RepositoryNotFoundError(
+                                f"Repository '{target_repo_name}' not found."
+                            )
+                    else:
+                        if isinstance(repo_model.embedding_provider, str) and repo_model.embedding_provider != self.embedding_engine.provider_name:
+                            raise RepositoryNotIndexedError(
+                                f"Repository '{repo_model.name}' was indexed with provider '{repo_model.embedding_provider}', "
+                                f"but current query embedding provider is '{self.embedding_engine.provider_name}'. "
+                                "Please re-index the repository."
+                            )
+                        if isinstance(repo_model.embedding_dimension, int) and repo_model.embedding_dimension != self.embedding_engine.embedding_dimension:
+                            raise RepositoryNotIndexedError(
+                                f"Repository '{repo_model.name}' was indexed with dimension {repo_model.embedding_dimension}d, "
+                                f"but current query embedding provider uses {self.embedding_engine.embedding_dimension}d. "
+                                "Please re-index the repository."
+                            )
+                        if isinstance(repo_model.status, str) and repo_model.status != "indexed":
+                            raise RepositoryNotIndexedError(
+                                f"Repository '{repo_model.name}' is currently {repo_model.status}, not indexed."
+                            )
+                        null_chunk = db_query.execute(
+                            select(ChunkModel.id)
+                            .join(FileModel, ChunkModel.file_id == FileModel.id)
+                            .where(FileModel.repository_id == repo_model.id, ChunkModel.embedding.is_(None))
+                            .limit(1)
+                        ).scalar_one_or_none()
+                        if null_chunk is not None:
+                            raise RepositoryNotIndexedError(
+                                f"Repository '{repo_model.name}' has unindexed or invalidated vector embeddings. "
+                                "Please re-index the repository."
+                            )
+                elif not self.is_indexed:
+                    raise RepositoryNotIndexedError(
+                        "No repository has been indexed yet. Call /repositories/index first."
+                    )
+
+                # Enforce vector dimension consistency between runtime vector store and active query embedding engine
+                if (
+                    self.vector_store is not None
+                    and isinstance(self.vector_store.embedding_dimension, int)
+                    and self.vector_store.embedding_dimension != self.embedding_engine.embedding_dimension
+                ):
+                    raise RepositoryNotIndexedError(
+                        f"Vector dimension mismatch: repository was indexed with {self.vector_store.embedding_dimension}d, "
+                        f"but active query embedding engine uses {self.embedding_engine.embedding_dimension}d. "
+                        "Please re-index the repository."
+                    )
+
+                t0_retr = time.perf_counter()
+                search_results = self.retriever.retrieve(
+                    query_clean,
+                    k=top_k,
+                    repository_id=repo_model.id if repo_model else None,
+                    repository_name=target_repo_name,
+                    db_session=db_query if repo_model else None,
+                )
+                t1_retr = time.perf_counter()
+            finally:
+                if auto_close_query:
+                    db_query.close()
 
             if intent == QueryIntent.MIXED:
                 # Custom mixed prompt context
@@ -556,30 +751,37 @@ class RAGService:
             provider=llm_response.provider,
             model=llm_response.model,
             latency_ms=llm_response.latency_ms,
+            repository_id=repo_model.id if repo_model else None,
+            db_session=db_session,
         )
 
-        # Persist conversation & messages if session_id is provided
+        # Persist conversation & messages if session_id or user_id is provided
         active_conversation_id = conversation_id
-        if session_id:
+        if session_id or user_id:
             try:
-                db, auto_close = self._get_db_session()
+                db, auto_close = (db_session, False) if db_session is not None else self._get_db_session()
                 try:
                     conv = None
                     if conversation_id:
-                        conv = get_conversation(db, conversation_id=conversation_id, session_id=session_id)
+                        conv = get_conversation(
+                            db, conversation_id=conversation_id, session_id=session_id, user_id=user_id
+                        )
                     if not conv:
                         new_title = generate_conversation_title(query_clean)
                         conv = create_conversation(
                             db=db,
                             session_id=session_id,
+                            user_id=user_id,
                             title=new_title,
-                            repository_name=self.indexed_repository_name,
+                            repository_name=target_repo_name,
                             conversation_id=conversation_id,
                         )
                     elif conv.title in ("New Chat", "General Query") and intent != QueryIntent.GENERAL:
                         # Derive informative title once user asks specific query
                         updated_title = generate_conversation_title(query_clean)
-                        update_conversation_title(db, conv.id, session_id, updated_title)
+                        update_conversation_title(
+                            db, conv.id, session_id=session_id, user_id=user_id, title=updated_title
+                        )
 
                     active_conversation_id = conv.id
 
